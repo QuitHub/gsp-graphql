@@ -7,7 +7,7 @@ export const meta = {
   ],
 }
 
-const ROOT = '/home/ubuntu/projects/grackle'
+const ROOT = '/home/ubuntu/projects/libraries/grackle'
 const pages = typeof args === 'string' ? JSON.parse(args) : args
 
 const REPORT = {

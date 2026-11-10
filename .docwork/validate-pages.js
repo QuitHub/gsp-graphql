@@ -1,7 +1,7 @@
 // Post-authoring validation: existence, snip-tag correctness, relative-link integrity, mdoc counts.
 const fs = require('fs');
 const path = require('path');
-const R = '/home/ubuntu/projects/grackle';
+const R = '/home/ubuntu/projects/libraries/grackle';
 const snips = JSON.parse(fs.readFileSync(R + '/.docwork/snips.json', 'utf8'));
 const pages = JSON.parse(fs.readFileSync(R + '/.docwork/pages.json', 'utf8'));
 const allPagePaths = new Set(pages.map(p => p.path));

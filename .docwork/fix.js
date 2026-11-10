@@ -3,7 +3,7 @@ export const meta = {
   description: 'Apply reviewer findings to each flagged doc page, keeping the Laika/mdoc build green',
   phases: [ { title: 'Fix', detail: 'one agent per file applies its findings against real source' } ],
 }
-const ROOT = '/home/ubuntu/projects/grackle'
+const ROOT = '/home/ubuntu/projects/libraries/grackle'
 const files = typeof args === 'string' ? JSON.parse(args) : args
 
 const REPORT = { type:'object', additionalProperties:false, required:['file','changes','buildSafe','notes'],
