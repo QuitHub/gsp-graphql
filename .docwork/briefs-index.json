@@ -1,0 +1,77 @@
+[
+  {
+    "subsystem": "GraphQL Schema & SDL",
+    "slug": "graphql-schema-sdl",
+    "file": ".docwork/briefs/graphql-schema-sdl.json"
+  },
+  {
+    "subsystem": "Mappings core & catalog",
+    "slug": "mappings-core-catalog",
+    "file": ".docwork/briefs/mappings-core-catalog.json"
+  },
+  {
+    "subsystem": "Cursor & query interpreter",
+    "slug": "cursor-query-interpreter",
+    "file": ".docwork/briefs/cursor-query-interpreter.json"
+  },
+  {
+    "subsystem": "Query algebra, compiler & elaboration",
+    "slug": "query-algebra-compiler-elaboration",
+    "file": ".docwork/briefs/query-algebra-compiler-elaboration.json"
+  },
+  {
+    "subsystem": "Predicates, filtering, ordering, paging",
+    "slug": "predicates-filtering-ordering-paging",
+    "file": ".docwork/briefs/predicates-filtering-ordering-paging.json"
+  },
+  {
+    "subsystem": "Result, errors & Problem",
+    "slug": "result-errors-problem",
+    "file": ".docwork/briefs/result-errors-problem.json"
+  },
+  {
+    "subsystem": "Generic (derivation) backend",
+    "slug": "generic-derivation-backend",
+    "file": ".docwork/briefs/generic-derivation-backend.json"
+  },
+  {
+    "subsystem": "Circe (JSON) backend — grackle.circe",
+    "slug": "circe-json-backend-grackle-circe",
+    "file": ".docwork/briefs/circe-json-backend-grackle-circe.json"
+  },
+  {
+    "subsystem": "SQL mappings (joins, embedding, interfaces, unions, jsonb)",
+    "slug": "sql-mappings-joins-embedding-interfaces-unions-jsonb",
+    "file": ".docwork/briefs/sql-mappings-joins-embedding-interfaces-unions-jsonb.json"
+  },
+  {
+    "subsystem": "Mutations",
+    "slug": "mutations",
+    "file": ".docwork/briefs/mutations.json"
+  },
+  {
+    "subsystem": "Subscriptions",
+    "slug": "subscriptions",
+    "file": ".docwork/briefs/subscriptions.json"
+  },
+  {
+    "subsystem": "Effects & batching",
+    "slug": "effects-batching",
+    "file": ".docwork/briefs/effects-batching.json"
+  },
+  {
+    "subsystem": "Composition / federation of mappings",
+    "slug": "composition-federation-of-mappings",
+    "file": ".docwork/briefs/composition-federation-of-mappings.json"
+  },
+  {
+    "subsystem": "Introspection, directives, fragments, variables",
+    "slug": "introspection-directives-fragments-variables",
+    "file": ".docwork/briefs/introspection-directives-fragments-variables.json"
+  },
+  {
+    "subsystem": "HTTP integration & running operations",
+    "slug": "http-integration-running-operations",
+    "file": ".docwork/briefs/http-integration-running-operations.json"
+  }
+]

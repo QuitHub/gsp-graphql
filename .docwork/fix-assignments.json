@@ -1,0 +1,166 @@
+[
+  {
+    "file": "docs/tutorial/in-memory-model.md",
+    "findings": [
+      {
+        "severity": "major",
+        "lens": "links, navigation, structure",
+        "problem": "This is the central, most-linked-to tutorial (12 inbound links) yet it has ZERO outgoing internal documentation links anywhere in the page (the only real link is an external playground URL). It is a navigational dead-end: no 'See also'/'Next steps' section, no forward link to the next tutorial (db-backed-model), and no 'down'/'across' links to concepts or reference. The pages.json spec for this page explicitly required (a) 'Compiler & elaborator ... add concept cross-links' and (b) a 'NEW: How this uses generic derivation aside linking to how-to/generic-derivation' near the GenericMapping/GenericField discussion (lines 291, 301) — neither was added.",
+        "fix": "Add a closing '## Next steps' (or 'See also') section that chains forward to the [DB-backed model tutorial](db-backed-model.md) and [Mutations & subscriptions](mutations-subscriptions.md), and links across to the concepts/reference it teaches, e.g. [The compiler and elaboration](../concepts/compiler-elaboration.md), [Mappings and cursors](../concepts/mappings-cursors.md), [Query algebra reference](../reference/query-algebra.md). Also add an inline aside in the GenericMapping section linking to [Serve Scala ADTs with generic derivation](../how-to/generic-derivation.md), per the spec outline."
+      },
+      {
+        "severity": "minor",
+        "lens": "links, navigation, structure",
+        "problem": "The tutorial section's forward 'sequence' only exists on the landing page intro.md, which lists in-memory -> db-backed -> mutations-subscriptions in order. Within the body pages the chain is broken: in-memory-model.md does not link forward to db-backed-model.md, and db-backed-model.md does not link forward to mutations-subscriptions.md (only mutations-subscriptions.md has a rich 'Where to next'). A learner who lands mid-sequence (e.g. via the 12 deep links into in-memory-model) has no signposted next tutorial.",
+        "fix": "Add a one-line 'next in this series' pointer at the foot of in-memory-model.md (-> db-backed-model.md) and db-backed-model.md (-> mutations-subscriptions.md) so the three-part tutorial reads as a chain from any entry point, matching the order already promised in intro.md."
+      },
+      {
+        "severity": "major",
+        "lens": "Diataxis altitude (register correctness per declared diataxisType)",
+        "problem": "This is a tutorial (diataxisType: tutorial), which must stay linear, runnable and reassuring with no deep digressions. But this section drops out of the tutorial register into pure explanation/reference register: it hand-writes (not via an mdoc snip) the entire 21-node `Query` algebra ADT as a non-compiling ```scala block (UntypedSelect, Select, Group, Unique, Filter, Component, Effect, ... Empty), then narrates the internal untyped->typed transformation step by step (UntypedSelect(\"character\",...) being rewritten into a typed Select/Unique/Filter tree, the Int-vs-ID inference detail, etc.). None of this is runnable by the reader and it is a long mechanism digression in the middle of a build-it-and-run-it tutorial. The same material already has dedicated homes: the concepts/compiler-elaboration.md page (which has the identical `#compile_simple` walkthrough and 'From UntypedSelect to Select' explanation) and reference/query-algebra.md (which enumerates every node of the ADT). The page's own intended outline in pages.json says only 'Compiler & elaborator (#elaborator, kept; add concept cross-links)' — i.e. keep the elaborator snip and add cross-links, not dump the ADT and walk the transformation.",
+        "fix": "Cut the hand-written `Query` algebra ADT block (lines ~206-229) and the manual UntypedSelect->Select transformation narrative (lines ~231-282) down to a short tutorial-register paragraph: explain in one or two sentences that the elaborator rewrites the parsed query so the `character(id:)` argument becomes a `Filter`/`Unique` the interpreter can run, keep the `#elaborator` mdoc snip, and link out to concepts/compiler-elaboration.md and reference/query-algebra.md for the ADT and the full transformation. Keep the example query + JSON result so the section stays runnable and reassuring."
+      },
+      {
+        "severity": "minor",
+        "lens": "Diataxis altitude (register correctness per declared diataxisType)",
+        "problem": "Part of the same altitude drift: after the `#elaborator` snip is already shown, the tutorial inlines a second hand-written elaborator-case fragment and a hand-written 'transformed term' tree to teach how the algebra term is rewritten. This is mechanism-teaching (explanation register) inside a tutorial, and it is not compiled/runnable. The transformed-tree block is also internally inconsistent (`Unique(Eql(CharacterType / \"id\"), Const(\"1000\"))` is not the shape produced — `Unique` wraps a `Filter`, and the id is bound as the supplied value), so as written it both digresses and risks misleading.",
+        "fix": "Remove these two illustrative blocks from the tutorial and rely on the cross-link to concepts/compiler-elaboration.md, which already shows the correct UntypedSelect->Select transformation with a compiled snip. If a before/after is wanted in the tutorial, keep it to one sentence of prose, not a hand-typed algebra tree."
+      },
+      {
+        "severity": "major",
+        "lens": "completeness vs spec (pages.json outline + examples coverage)",
+        "problem": "The pages.json outline for this page explicitly calls for a NEW aside 'How this uses generic derivation' that links to how-to/generic-derivation, plus 'add concept cross-links'. Neither is present: the page mentions GenericMapping/GenericField in prose (around lines 290-301) but contains NO link to how-to/generic-derivation.md, no aside connecting the tutorial to generic derivation, and no 'See also'/cross-link section at all (rg for 'how-to/|concepts/|reference/' returns NONE). The sibling NEW tutorial (mutations-subscriptions.md) has a full '## Where to next' cross-link block, confirming this is the intended pattern that was dropped here.",
+        "fix": "Add the NEW aside (e.g. a short blockquote/section near 'The query interpreter and cursor' noting that this in-memory model is using generic derivation under the hood) with an explicit link to ../how-to/generic-derivation.md, and append a 'See also' / 'Next' section cross-linking the relevant concept pages (compiler-elaboration, mappings-cursors, query-interpreter) as the outline's 'add concept cross-links' note requires."
+      },
+      {
+        "severity": "major",
+        "lens": "GraphQL & JSON example correctness",
+        "problem": "The hand-written Star Wars schema shown in 'The Schema' section contradicts the real demo schema that the very same page inlines a few lines below via the `#schema` snip (println(... snip(\"demo/src/main/scala/demo/starwars/StarWarsMapping.scala\", \"#schema\"))). The page presents two different, conflicting versions of the same schema. Concretely the hand-written block declares `hero(episode: Episode!): Character`, `id: ID!`, `name: String!`, `friends: [Character]`, `appearsIn: [Episode]!`, whereas the actual demo source (and the inlined snip) declare `hero(...): Character!`, `id: String!`, `name: String`, `friends: [Character!]`, `appearsIn: [Episode!]`. Because the page also uses integer id literals like `character(id: 1000)` / `character(id: 1002)`, those are only valid under the shown `id: ID!`; against the real `id: String!` an Int literal would not coerce, so the divergence is load-bearing and misleads the reader about the schema they are actually running.",
+        "fix": "Make the hand-written SDL block match the demo source exactly: `hero(episode: Episode!): Character!`, and on Character/Human/Droid use `id: String!`, `name: String`, `friends: [Character!]`, `appearsIn: [Episode!]`. (Or drop the hand-written block entirely and rely on the `#schema` snip already inlined below it, so there is a single source of truth.) If you keep `id: ID!`, then also change the demo source — but the simplest fix is to align the prose schema to the snip."
+      },
+      {
+        "severity": "minor",
+        "lens": "GraphQL & JSON example correctness",
+        "problem": "The JSON block illustrating the friendship cycle is not shape-consistent: the inner `friends` array under \"Han Solo\" is opened with `[` and an element `{ \"name\": \"Luke Skywalker\" }`, then a bare `...`, but the array and the surrounding objects are never closed correctly — the object holding \"Han Solo\" is closed with a single `}` while its `friends` array bracket is left dangling. The bracket nesting does not correspond to the query shape (`character { name friends { name friends { name } } }`), so a reader tracing the structure gets inconsistent nesting rather than a clean truncation.",
+        "fix": "Either show the full (untruncated) response for this small query, or make the elision well-formed, e.g. close the array/objects around the `...`: `\"friends\": [ { \"name\": \"Luke Skywalker\" }, { \"name\": \"Leia Organa\" } ] }` (dropping the `...`), keeping every opened `[`/`{` balanced."
+      }
+    ]
+  },
+  {
+    "file": "docs/tutorial/db-backed-model.md",
+    "findings": [
+      {
+        "severity": "major",
+        "lens": "links, navigation, structure",
+        "problem": "The page's only internal links are two backward references to in-memory-model.md (#the-query-compiler-and-elaborator, #the-service); the rest are external (doobie/skunk). Despite being entirely about serving GraphQL from PostgreSQL/SQL, it links to NO SQL how-to or reference page, and has no forward navigation. The pages.json spec explicitly required 'NEW: cross-links to SQL how-to/reference pages', which was never added. It also does not chain forward to the next tutorial (mutations-subscriptions.md), breaking the tutorial sequence.",
+        "fix": "Add a closing 'Next steps'/'See also' section linking to the relevant SQL pages the tutorial assumes, e.g. [Choose and configure a SQL backend](../how-to/sql-backends.md), [SqlMapping reference](../reference/sql-mapping.md), [Filter, sort and page a field](../how-to/filtering-ordering-paging.md), and forward to [Mutations & subscriptions](mutations-subscriptions.md)."
+      },
+      {
+        "severity": "minor",
+        "lens": "cross-page consistency",
+        "problem": "The Skunk documentation link is `tpolecat.github.io/skunk/` here, but install.md and index.md link Skunk as `typelevel.org/skunk/`. Skunk's canonical docs site is typelevel.org/skunk/; the tpolecat.github.io URL is the stale pre-Typelevel address. The same page also links doobie as tpolecat.github.io/doobie/ while install.md uses typelevel.org/doobie/. Inconsistent and pointing at legacy URLs.",
+        "fix": "Standardise on the Typelevel URLs used in install.md: `https://typelevel.org/skunk/` and `https://typelevel.org/doobie/`. Update index.md's `tpolecat.github.io/doobie/` to match as well."
+      },
+      {
+        "severity": "major",
+        "lens": "completeness vs spec (pages.json outline + examples coverage)",
+        "problem": "The pages.json outline lists a NEW final item 'cross-links to SQL how-to/reference pages'. That section is entirely absent: the page ends at 'Putting it all together' with no 'See also' / cross-link block, and rg for 'how-to/|concepts/|reference/' over the file returns NONE. Every concept/how-to/reference page in the docs has a 'See also' block, and the sibling tutorial mutations-subscriptions.md has a 'Where to next' block, so this tutorial is the outlier and the spec's NEW section was dropped.",
+        "fix": "Add a 'See also' / 'Where to next' section at the end linking the SQL how-to and reference pages the outline intends, e.g. ../how-to/sql-backends.md (choose/configure a backend), ../how-to/interfaces-unions.md, ../how-to/filtering-ordering-paging.md, ../reference/sql-mapping.md, and the SQL predicates/paging references."
+      }
+    ]
+  },
+  {
+    "file": "docs/how-to/sql-backends.md",
+    "findings": [
+      {
+        "severity": "minor",
+        "lens": "API existence & signatures",
+        "problem": "`DoobiePgMapping` and `SkunkMapping` are `abstract class`es in the source (modules/doobie-pg/src/main/scala/DoobiePgMapping.scala:25 `abstract class DoobiePgMapping[F[_]](...)`; modules/skunk/shared/src/main/scala/SkunkMapping.scala:34 `abstract class SkunkMapping[F[_]](...)`), not traits. The mixin traits are `DoobiePgMappingLike[F]` / `SkunkMappingLike[F]`. As written, `trait MyDoobieMapping[F[_]] extends DoobiePgMapping[F]` would not compile (a trait cannot extend an abstract class with a constructor), and the later `new DoobiePgMapping[F](transactor, monitor) with MyDoobieMapping[F]` would attempt to inherit the same abstract class twice. The page already labels the block \"illustrative rather than compiled,\" which limits the harm, but the word \"trait\" is factually wrong for these names.",
+        "fix": "Call `DoobiePgMapping`/`SkunkMapping` what they are: \"abstract base classes.\" For the user-mapping sketch, mix in the `*Like` trait instead, mirroring the demo pattern, e.g. `trait MyDoobieMapping[F[_]] extends DoobiePgMappingLike[F] { ... }` and `new DoobiePgMapping[F](transactor, monitor) with MyDoobieMapping[F]`, and likewise `trait MySkunkMapping[F[_]] extends SkunkMappingLike[F]` with `new SkunkMapping[F](pool, monitor) with MySkunkMapping[F]`."
+      },
+      {
+        "severity": "major",
+        "lens": "cross-page consistency",
+        "problem": "This how-to (and interfaces-unions.md) present `PrefixedMapping` as the idiomatic, recommended solution, but the concept and reference pages explicitly call it legacy/backwards-compat and tell readers to prefer `PathMatch`. mappings-cursors.md: '`PrefixedTypeMatch(prefix, tpe)` is the legacy `PrefixedMapping` semantics, kept for backwards compatibility; new code should reach for `PathMatch` instead.' mapping-types.md: 'Prefer `PathMatch` over `PrefixedTypeMatch` in new code; `PrefixedMapping(...)` remains as a backwards-compat shim'. Source confirms this (mapping.scala: 'Backwards compatible constructor for legacy PrefixedMapping'; PathMatch '...should be preferred to PrefixedTypeMatch'). So the task pages teach a construct the rest of the docs deprecate, with no note of the preferred alternative.",
+        "fix": "Reconcile: either present `PathMatch` (or the `ObjectMapping(path)(...)` constructor that builds it) as the primary recommendation here and note `PrefixedMapping` only as the older form the inlined test snippet happens to use, or at minimum add a sentence linking to the reference and stating PathMatch is preferred for new code. Apply the same fix in interfaces-unions.md."
+      }
+    ]
+  },
+  {
+    "file": "docs/reference/result-problem.md",
+    "findings": [
+      {
+        "severity": "minor",
+        "lens": "snippet/prose agreement",
+        "problem": "The claim about a point location printing as a bare number is correct in the library (problem.scala line 40: `if (a == b) a.toString else s\"$a..$b\"`), but the #problem_encoding snippet introduced immediately after as the 'verbatim worked examples' only contains the toString case Problem(\"foo\", List(1 -> 2, 5 -> 6), ...) => \"foo (at bar/baz: 1..2, 5..6)\" — both are ranges, never a point location. The displayed snippet does not illustrate the bare-number behavior the sentence attributes to it.",
+        "fix": "Either soften the framing (note the bare-number case is not shown in this snippet), or add a one-line illustrative example of a point location (e.g. Problem with locations List(3 -> 3) printing '3' not '3..3') so the prose claim is backed by what is on the page."
+      }
+    ]
+  },
+  {
+    "file": "docs/how-to/errors.md",
+    "findings": [
+      {
+        "severity": "minor",
+        "lens": "snippet/prose agreement",
+        "problem": "This sentence quotes a source comment that lives in the #upper_phase/#upper_mapping snippet (QueryDirectivesSuite.scala) — but the snippet displayed on THIS page at line 45 is #upper_query, which contains only the query text, expected JSON and the assert. The quoted comment does not appear in the snippet shown here, so a reader checking the displayed code will not find it. (The MARY/mary/42-with-warning behavior the rest of the paragraph describes does match #upper_query.)",
+        "fix": "Either drop the comment quotation on this page (it belongs with the #upper_phase snip on the query-directives page), or attribute it explicitly to the elaborator on the query-directives page rather than implying it is visible in the snippet just shown."
+      }
+    ]
+  },
+  {
+    "file": "docs/getting-started/overview.md",
+    "findings": [
+      {
+        "severity": "major",
+        "lens": "cross-page consistency",
+        "problem": "This page (and mapping-types.md) tell the reader the in-memory model tutorial is a `ValueMapping` example, but the tutorial it links to actually builds the Star Wars model with `GenericMapping`/`GenericField` (verified: demo/src/main/scala/demo/starwars/StarWarsMapping.scala line 30 `extends GenericMapping[F]`, lines 78-81 use `GenericField`). The in-memory-model.md tutorial itself (its 'query interpreter and cursor' section) and the generic-derivation how-to both correctly describe it as a `GenericMapping`. The actual `ValueMapping` example is the quick-start (QuickStartMapping extends ValueMapping[IO]). So two pages mislabel which backend the tutorial teaches, contradicting the tutorial and the generic-derivation pages.",
+        "fix": "Change the cross-reference to point ValueMapping at the quick-start (and/or filtering how-to, which are the real ValueMapping examples), and describe the in-memory model tutorial as a GenericMapping example. E.g. 'ValueMapping — the simplest backend; see the quick start. GenericMapping — derives cursors from your ADTs, and the basis of the in-memory model (Star Wars) tutorial.'"
+      }
+    ]
+  },
+  {
+    "file": "docs/reference/mapping-types.md",
+    "findings": [
+      {
+        "severity": "major",
+        "lens": "cross-page consistency",
+        "problem": "Same contradiction as overview.md: the in-memory-model tutorial is built with `GenericMapping`/`GenericField`, not `ValueMapping`. The reference's own mapping-types page elsewhere lists GenericMapping separately, so calling that tutorial 'a ValueMapping from scratch' is inconsistent with the linked tutorial and with the generic-derivation reference (which names that same demo as its canonical GenericMapping example).",
+        "fix": "Reword to '[Build an in-memory model](../tutorial/in-memory-model.md) — a GenericMapping over Star Wars ADTs', or point the 'ValueMapping from scratch' phrasing at the quick start, which is the actual from-scratch ValueMapping."
+      }
+    ]
+  },
+  {
+    "file": "docs/how-to/interfaces-unions.md",
+    "findings": [
+      {
+        "severity": "major",
+        "lens": "cross-page consistency",
+        "problem": "Recommends `PrefixedMapping` consistently with sql-backends.md but in conflict with the concept/reference pages that call PrefixedMapping/PrefixedTypeMatch legacy and recommend PathMatch. A reader who reads the reference first and the how-to second gets contradictory guidance about which predicate to use for context-sensitive mappings.",
+        "fix": "Same as the sql-backends.md fix: note that PathMatch is the preferred construct for new code (per the reference) and that PrefixedMapping is the legacy form shown only because the inlined test mapping predates PathMatch."
+      }
+    ]
+  },
+  {
+    "file": "docs/concepts/architecture.md",
+    "findings": [
+      {
+        "severity": "minor",
+        "lens": "cross-page consistency",
+        "problem": "The diagram's enumeration of the Query algebra nodes lists Limit but omits Offset, whereas the same page's prose two paragraphs later (Layer 2) lists 'Select, Filter, Unique, Limit, Offset, OrderBy, Count, Component, Effect and Environment', and the 'Staging' note lists 'Limit / Offset / OrderBy / Count'. The diagram is internally inconsistent with the page's own prose (Offset is a first-class node per query-algebra.md).",
+        "fix": "Add `Offset` to the diagram's node list so it matches the prose and the query-algebra reference (e.g. 'Select, Filter, Unique, Limit, Offset, OrderBy, Count, Component, Effect, Environment, …')."
+      }
+    ]
+  },
+  {
+    "file": "docs/index.md",
+    "findings": [
+      {
+        "severity": "minor",
+        "lens": "consistency",
+        "problem": "The Doobie link uses the stale tpolecat.github.io/doobie/ URL.",
+        "fix": "Change any https://tpolecat.github.io/doobie/ link to https://typelevel.org/doobie/. Leave other links unchanged."
+      }
+    ]
+  }
+]

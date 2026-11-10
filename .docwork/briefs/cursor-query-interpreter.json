@@ -1,0 +1,431 @@
+{
+  "subsystem": "Cursor & query interpreter",
+  "summary": "The Cursor abstraction (modules/core/src/main/scala/cursor.scala) is Grackle's read-only navigator over an arbitrary backing data model during GraphQL query execution. A Cursor knows its focus (the current value, typed Any), its GraphQL tpe via a Context, and exposes type-driven navigation: field, narrow/narrowsTo (interface/union narrowing), asLeaf (scalar/enum to Json), asList/preunique (lists and the antecedent of Unique), asNullable/isDefined (nullables), plus environment (Env) accessors. The QueryInterpreter (modules/core/src/main/scala/queryinterpreter.scala) walks a Query against a root Cursor, dispatching on (query, tpe.dealias) in runValue/runFields/runList to build a ProtoJson - an opaque, possibly-partial JSON tree that may contain DeferredJson (EffectJson) subtrees delegated to component/effect interpreters. completeAll then batches and resolves those deferred subtrees stage-by-stage and substitutes the results back into the enclosing JSON. Throughout, errors and warnings are accumulated rather than thrown using the four-armed Result type (Success/Warning/Failure/InternalError).",
+  "keyConcepts": [
+    {
+      "name": "Cursor",
+      "explanation": "A position within an abstract data model during query interpretation. Carries a focus (the value, typed Any), a Context (schema path + result/alias path + GraphQL type), an optional parent, and an Env. All navigation methods return Result so failures (wrong type, missing field) are accumulated, not thrown. Concrete cursors (ValueCursor, CirceCursor, generic CursorBuilder cursors, SqlMapping cursors) implement the type-driven navigation against their specific backing model."
+    },
+    {
+      "name": "Context",
+      "explanation": "Immutable record of position in the output tree: rootTpe, path (schema field names, reversed/innermost-first), resultPath (path with query aliases applied), and typePath (the GraphQL Type at each level). tpe is typePath.head (or rootTpe at the root). forField/forFieldOrAttribute/asType derive child contexts. Note equals compares rootTpe with =:= and only path/resultPath (not typePath), and hashCode is just resultPath.hashCode."
+    },
+    {
+      "name": "focus / tpe duality",
+      "explanation": "Every Cursor pairs an untyped runtime value (focus: Any) with the GraphQL Type it is expected to represent (tpe, from context). Navigation methods pattern-match on (tpe, focus) together - e.g. ValueCursor.isList is true only when tpe is a ListType AND focus is a List[_]. Mismatch yields a Result.internalError. cursorCompatible in the interpreter guards each step by stripping nullable/list wrappers and comparing leaf-ness or nominal equality."
+    },
+    {
+      "name": "Type-directed interpretation",
+      "explanation": "runValue dispatches on (query, tpe.dealias): scalar/enum -> asLeaf; object/interface/union -> runFields; ListType -> runList; NullableType -> asNullable then recurse; Unique -> preunique then runList(unique=true); plus Environment, Component, TransformCursor cases. runFields handles Select, Group, Narrow, Count, Effect, __typename Introspect, Environment, TransformCursor and returns (resultName, ProtoJson) pairs."
+    },
+    {
+      "name": "ProtoJson",
+      "explanation": "An opaque type (type ProtoJson <: AnyRef) of a partially-constructed result. A ProtoJson is either a complete io.circe.Json, or one of the package-private DeferredJson/ProtoObject/ProtoArray/ProtoSelect wrappers when some subtree is deferred. Constructors (fromJson, fromFields, fromDisjointFields, fromValues, select, component, effect) collapse to plain Json eagerly when all children are already Json, so deferral wrappers only appear when genuinely needed."
+    },
+    {
+      "name": "Deferred / staged evaluation",
+      "explanation": "Component joins and Effect fields produce EffectJson(mapping, handler, query, cursor) leaves inside the ProtoJson. complete/completeAll gather all DeferredJson leaves, group them by (mapping, handler), run each batch (via mapping.combineAndRun or handler.runEffects), recursively complete the next stage, then scatter results back using an IdentityHashMap keyed on the deferred nodes. This is how composite/batched and effectful resolution works."
+    },
+    {
+      "name": "Env",
+      "explanation": "A sealed key/value environment (EmptyEnv / NonEmptyEnv) threaded through cursors and queries. Cursor.env[T](name) looks up the local env then walks parents; fullEnv accumulates parent-to-child; withEnv adds values. Query.Environment nodes inject env during elaboration/execution (Env.addFromQuery)."
+    },
+    {
+      "name": "Error accumulation via Result",
+      "explanation": "Result[+T] has four cases: Success, Warning(problems, value) (a value AND non-fatal problems), Failure(problems) (no value, GraphQL errors), and InternalError(throwable). flatMap/combine carry and merge problems; the interpreter uses Warning to keep partial data while collecting field-level errors, and runOneShot converts a top-level Failure into Warning(errs, Json.Null) so a data:null + errors response is produced."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Cursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "trait Cursor { def parent: Option[Cursor]; def focus: Any; def context: Context; def path: List[String] = context.path; def resultPath: List[String] = context.resultPath; def tpe: Type = context.tpe; def withEnv(env: Env): Cursor; private[grackle] def env: Env }",
+      "purpose": "The core read-only navigator over a backing data model. Pairs an untyped focus value with the GraphQL Context/Type at that position."
+    },
+    {
+      "name": "Cursor.as",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def as[T: ClassTag: TypeName]: Result[T]",
+      "purpose": "Cast the focus to a concrete Scala type T, yielding a descriptive error Result if the runtime class does not match."
+    },
+    {
+      "name": "Cursor.isLeaf / asLeaf",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def isLeaf: Boolean; def asLeaf: Result[Json]",
+      "purpose": "Test whether focus is scalar/enum, and render it as circe Json. asLeaf is the terminal step for scalar fields in runValue."
+    },
+    {
+      "name": "Cursor.preunique",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def preunique: Result[Cursor]",
+      "purpose": "Yield a Cursor suitable as the antecedent of a Unique operation - re-types the focus as a list (tpe.nonNull.list) so runList(unique=true) can pull out the single element. AbstractCursor's default errors; ValueCursor/CirceCursor override to wrap when focus is actually a list/array."
+    },
+    {
+      "name": "Cursor.isList / asList / listSize",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def isList: Boolean; final def asList: Result[List[Cursor]] = asList(List); def asList[C](factory: Factory[Cursor, C]): Result[C]; def listSize: Result[Int]",
+      "purpose": "Test/iterate list-typed focuses. The interpreter calls asList(Iterator) for streaming-style traversal; asList (no arg) is the convenience List form used in tests."
+    },
+    {
+      "name": "Cursor.isNullable / asNullable / isDefined / isNull",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def isNullable: Boolean; def asNullable: Result[Option[Cursor]]; def isDefined: Result[Boolean]; def isNull: Boolean",
+      "purpose": "Navigate nullable types. asNullable returns Some(childCursor) when present, None when absent; the interpreter substitutes Json.Null when None."
+    },
+    {
+      "name": "Cursor.narrowsTo / narrow",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def narrowsTo(subtpe: TypeRef): Result[Boolean]; def narrow(subtpe: TypeRef): Result[Cursor]",
+      "purpose": "Interface/union narrowing. narrowsTo tests run-time membership of subtpe; narrow returns a Cursor re-typed to subtpe (used for Narrow query nodes and __typename resolution)."
+    },
+    {
+      "name": "Cursor.field / fieldAs / nullableField",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def field(fieldName: String, resultName: Option[String]): Result[Cursor]; def fieldAs[T: ClassTag: TypeName](fieldName: String): Result[T]; def nullableField(fieldName: String): Result[Cursor]",
+      "purpose": "Descend into a named field, optionally under a query alias (resultName). Concrete cursors typically delegate to mapping.mkCursorForField."
+    },
+    {
+      "name": "Cursor.path / listPath / flatListPath",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def path(fns: List[String]): Result[Cursor]; def listPath(fns: List[String]): Result[List[Cursor]]; def flatListPath(fns: List[String]): Result[List[Cursor]]",
+      "purpose": "Follow a multi-field path from this cursor, transparently traversing nullables and lists. Used by predicates/joins to reach nested attribute values."
+    },
+    {
+      "name": "Cursor.env / envR / fullEnv / withEnv",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "def env[T: ClassTag](nme: String): Option[T]; def envR[T: ClassTag: TypeName](nme: String): Result[T]; def fullEnv: Env; def withEnv(env: Env): Cursor",
+      "purpose": "Read/extend the environment threaded through the cursor tree. env walks parents; fullEnv accumulates root-to-here; withEnv returns a copy with extra bindings."
+    },
+    {
+      "name": "Cursor companion object",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "object Cursor { def flatten(c: Cursor): Result[List[Cursor]]; def flatten(cs: List[Cursor]): Result[List[Cursor]] }",
+      "purpose": "flatten recursively expands lists and nullables into a flat List[Cursor] of leaf positions."
+    },
+    {
+      "name": "Cursor.AbstractCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "abstract class AbstractCursor extends Cursor { def isLeaf: Boolean = false; def asLeaf: Result[Json] = ...; def preunique: Result[Cursor] = ...; def isList = false; ... def field(fieldName: String, resultName: Option[String]): Result[Cursor] = Result.internalError(...) }",
+      "purpose": "Base class giving every navigation method a sensible error default, so a concrete cursor only overrides the cases its model actually supports."
+    },
+    {
+      "name": "Cursor.ProxyCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "class ProxyCursor(underlying: Cursor) extends Cursor { /* delegates every method to underlying */ }",
+      "purpose": "Delegating base for cursors that wrap another cursor and override a few methods (ListTransformCursor, NullCursor, NullFieldCursor)."
+    },
+    {
+      "name": "Cursor.EmptyCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "case class EmptyCursor(context: Context, parent: Option[Cursor], env: Env) extends AbstractCursor",
+      "purpose": "A contentless cursor (focus access errors); used as a placeholder position carrying only context/env."
+    },
+    {
+      "name": "Cursor.ListTransformCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "case class ListTransformCursor(underlying: Cursor, newSize: Int, newElems: Seq[Cursor]) extends ProxyCursor(underlying)",
+      "purpose": "List proxy that substitutes an alternative element set/size - the result of a TransformCursor over a list (e.g. filter/order/limit re-projection)."
+    },
+    {
+      "name": "Cursor.NullCursor / NullFieldCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "case class NullCursor(underlying: Cursor) extends ProxyCursor(underlying); case class NullFieldCursor(underlying: Cursor) extends ProxyCursor(underlying)",
+      "purpose": "NullCursor always reports isDefined=false / asNullable=None (forces null). NullFieldCursor wraps every child field result in a NullCursor."
+    },
+    {
+      "name": "Cursor.DeferredCursor",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "case class DeferredCursor(context: Context, parent: Option[Cursor], env: Env, deferredPath: List[String], mkCursor: (Context, Cursor) => Result[Cursor]) extends AbstractCursor; object DeferredCursor { def apply(path: Path, mkCursor: (Context, Cursor) => Result[Cursor]): Cursor }",
+      "purpose": "A cursor that defers construction of the real cursor until a given path prefix is traversed, invoking mkCursor at the end of the path. Used to splice a sub-model in part-way down a query."
+    },
+    {
+      "name": "Context",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "case class Context(rootTpe: Type, path: List[String], resultPath: List[String], typePath: List[Type]) { lazy val tpe: Type; def asType(tpe: Type): Context; def forField(fieldName: String, resultName: Option[String]): Result[Context]; def forFieldOrAttribute(...): Context; def parent: Option[Context] }",
+      "purpose": "Tracks schema path, alias-applied result path, and the GraphQL type stack for a cursor position. Key derivations: asType (re-type current level), forField (descend), parent (ascend)."
+    },
+    {
+      "name": "Context companion",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "object Context { def apply(rootTpe: Type): Context; def apply(rootTpe: Type, fieldName: String, resultName: Option[String]): Option[Context]; def apply(path: Path): Result[Context] }",
+      "purpose": "Build a root Context for a type, or a context at a field/path. Context(IntType) is the common idiom in tests to root a leaf cursor."
+    },
+    {
+      "name": "Env",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "sealed trait Env { def add[T](items: (String, T)*): Env; def add(env: Env): Env; def contains(name: String): Boolean; def get[T: ClassTag](name: String): Option[T]; def isEmpty: Boolean; def getR[A: ClassTag: TypeName](name: String): Result[A]; def addFromQuery(query: Query): Env }; object Env { def empty: Env; def apply[T](items: (String, T)*): Env }",
+      "purpose": "Immutable typed environment carried by cursors and queries. get is type-checked via ClassTag.unapply, so a wrongly-typed lookup returns None."
+    },
+    {
+      "name": "QueryInterpreter",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "class QueryInterpreter[F[_]](mapping: Mapping[F]) { def run(query: Query, rootTpe: Type, env: Env): Stream[F, Result[Json]] }",
+      "purpose": "Top-level driver. run interprets a query and completes all deferred/staged subtrees, yielding a Stream of fully-resolved Result[Json] (a stream because subscriptions yield many)."
+    },
+    {
+      "name": "QueryInterpreter.runRootValue / runOneShot / runSubscription",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def runRootValue(query: Query, rootTpe: Type, parentCursor: Cursor): F[Result[ProtoJson]]; def runOneShot(query: Query, rootTpe: Type, rootCursor: Cursor): F[Result[ProtoJson]]; def runSubscription(query: Query, rootTpe: Type, rootCursor: Cursor): Stream[F, Result[ProtoJson]]",
+      "purpose": "Single-stage entry points producing a possibly-deferred ProtoJson. runOneShot splits queries into pure/introspection/effectful, runs each, and merges; runRootValue builds a default root cursor then runValue."
+    },
+    {
+      "name": "QueryInterpreter.runValue / runFields / runList",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def runValue(query: Query, tpe: Type, cursor: Cursor): Result[ProtoJson]; def runFields(query: Query, tpe: Type, cursor: Cursor): Result[List[(String, ProtoJson)]]; def runList(query: Query, tpe: Type, parent: Cursor, unique: Boolean, nullable: Boolean): Result[ProtoJson]",
+      "purpose": "The recursive interpretation core. runValue dispatches on (query, tpe.dealias); runFields produces named field results for object/interface/union types; runList iterates list cursors applying filter/order/offset/limit and handles Unique."
+    },
+    {
+      "name": "QueryInterpreter.cursorCompatible",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def cursorCompatible(tpe: Type, cursorTpe: Type): Boolean",
+      "purpose": "Guard run at each level: strips nullable/list wrappers and accepts if both are leaves or are nominally equal. A mismatch produces an internalError instead of silently mis-walking."
+    },
+    {
+      "name": "QueryInterpreter.ProtoJson",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "type ProtoJson <: AnyRef; object ProtoJson { def fromJson(value: Json): ProtoJson; def fromFields(fields: Seq[(String, ProtoJson)]): ProtoJson; def fromDisjointFields(fields: Seq[(String, ProtoJson)]): ProtoJson; def fromValues(elems: Seq[ProtoJson]): ProtoJson; def select(elem: ProtoJson, fieldName: String): ProtoJson; def component[F[_]](mapping: Mapping[F], query: Query, cursor: Cursor): ProtoJson; def effect[F[_]](mapping: Mapping[F], handler: EffectHandler[F], query: Query, cursor: Cursor): ProtoJson; def isDeferred(p: ProtoJson): Boolean; def mergeProtoJson(elems: Seq[ProtoJson]): ProtoJson }",
+      "purpose": "Opaque partial-result tree. Constructors collapse to plain circe Json when all children are Json, otherwise retain ProtoObject/ProtoArray/ProtoSelect/EffectJson wrappers for later completion."
+    },
+    {
+      "name": "QueryInterpreter.complete / completeAll",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def complete[F[_]: Monad](pj: ProtoJson): F[Result[Json]]; def completeAll[F[_]: Monad](pjs: List[ProtoJson]): F[Result[List[Json]]]",
+      "purpose": "Resolve deferred subtrees: gather DeferredJson leaves, batch by (mapping, handler), run each batch, recursively complete the next stage, then scatter results back into the enclosing JSON via an IdentityHashMap."
+    },
+    {
+      "name": "Query.EffectHandler",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "trait EffectHandler[F[_]] { def runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]] }",
+      "purpose": "Pluggable batch effect resolver. completeAll calls runEffects with all (continuation-query, cursor) pairs deferred to this handler, then re-enters runValue for each returned cursor."
+    },
+    {
+      "name": "Mapping.RootCursor / defaultRootCursor",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootCursor(context: Context, parent: Option[Cursor], env: Env) extends AbstractCursor { def focus: Any = (); override def field(fieldName: String, resultName: Option[String]): Result[Cursor] = mkCursorForField(this, fieldName, resultName) }; def defaultRootCursor(query: Query, tpe: Type, parentCursor: Option[Cursor]): F[Result[(Query, Cursor)]]",
+      "purpose": "The synthetic cursor at the query root (focus is Unit); its field method delegates into the mapping's mkCursorForField to enter the real model."
+    },
+    {
+      "name": "ValueCursor (reference concrete impl)",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "case class ValueCursor(context: Context, focus: Any, parent: Option[Cursor], env: Env) extends Cursor",
+      "purpose": "Canonical Cursor over plain Scala values: matches on (tpe, focus) for isList/asList/asNullable/preunique/narrowsTo, and uses mkChild to build child cursors with re-typed context."
+    },
+    {
+      "name": "CirceCursor (reference concrete impl)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CirceCursor(context: Context, focus: Json, parent: Option[Cursor], env: Env) extends Cursor",
+      "purpose": "Cursor over a circe Json document: isLeaf/asLeaf validate the Json shape against the GraphQL scalar/enum type; narrowsTo checks required fields are present."
+    },
+    {
+      "name": "CursorBuilder (generic derivation)",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "trait CursorBuilder[T] { def tpe: Type; def build(context: Context, focus: T, parent: Option[Cursor] = None, env: Env = Env.empty): Result[Cursor]; final def contramap[A](f: A => T): CursorBuilder[A] }",
+      "purpose": "Typeclass that produces a Cursor for a Scala value of type T at a given Context. The most direct, test-covered way to construct a Cursor by hand."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Build a leaf cursor and render it as Json",
+      "code": "import grackle._\nimport grackle.generic.CursorBuilder\nimport grackle.ScalarType.IntType\nimport io.circe.Json\n\nval result: Result[Json] =\n  for {\n    c <- CursorBuilder[Int].build(Context(IntType), 23)\n    _  = assert(c.isLeaf)\n    l <- c.asLeaf\n  } yield l\n\n// result == Result.Success(Json.fromInt(23))",
+      "explanation": "CursorBuilder is the simplest way to obtain a real Cursor. Context(IntType) roots it at a scalar type; isLeaf is true and asLeaf yields the circe Json. Verbatim shape from DerivationSuite 'primitive types have leaf cursor builders'.",
+      "needsDb": false
+    },
+    {
+      "title": "Descend into a nullable field, then asLeaf",
+      "code": "// `lukeSkywalker: Human`, with an implicit CursorBuilder[Human]\nval name: Result[Json] =\n  for {\n    c <- CursorBuilder[Human].build(Context(StarWarsMapping.HumanType), lukeSkywalker)\n    f <- c.field(\"name\", None)\n    n <- f.asNullable.flatMap(_.toResultOrError(\"missing\"))\n    l <- n.asLeaf\n  } yield l\n\n// name == Result.Success(Json.fromString(\"Luke Skywalker\"))",
+      "explanation": "field descends by GraphQL field name (None = no alias). Because `name` is nullable in the schema, the child cursor is nullable: asNullable returns Result[Option[Cursor]], and toResultOrError turns an absent value into an error. From DerivationSuite 'product types have cursor builders'.",
+      "needsDb": false
+    },
+    {
+      "title": "Traverse a list field",
+      "code": "val appearsIn: Result[List[Json]] =\n  for {\n    c <- CursorBuilder[Character].build(Context(StarWarsMapping.CharacterType), lukeSkywalker)\n    f <- c.field(\"appearsIn\", None)\n    n <- f.asNullable.flatMap(_.toResultOrError(\"missing\"))\n    l <- n.asList(List)\n    s <- l.traverse(_.asLeaf)\n  } yield s\n\n// s == List(Json.fromString(\"NEWHOPE\"), Json.fromString(\"EMPIRE\"), Json.fromString(\"JEDI\"))",
+      "explanation": "asNullable unwraps the nullable wrapper, then asList(List) yields one child Cursor per element. Each element is itself a leaf cursor here. From DerivationSuite 'cursor builders can be resolved for nested types'.",
+      "needsDb": false
+    },
+    {
+      "title": "Narrow an interface cursor to a concrete subtype",
+      "code": "val homePlanet: Result[Json] =\n  for {\n    c <- CursorBuilder[Character].build(Context(StarWarsMapping.CharacterType), lukeSkywalker)\n    h <- c.narrow(StarWarsMapping.HumanType)   // Character -> Human\n    m <- h.field(\"homePlanet\", None)\n    n <- m.asNullable.flatMap(_.toResultOrError(\"missing\"))\n    l <- n.asLeaf\n  } yield l\n\n// homePlanet == Result.Success(Json.fromString(\"Tatooine\"))",
+      "explanation": "narrow re-types the cursor to a subtype (here Human), making its fields accessible. narrowsTo(subtpe) is the boolean predicate version. homePlanet exists only on Human, so the narrow is required first. From DerivationSuite 'sealed ADTs have narrowable cursor builders'.",
+      "needsDb": false
+    },
+    {
+      "title": "End-to-end: compile and run a query through the interpreter",
+      "code": "// StarWarsMapping is a generic Mapping[IO]\nval query = \"\"\"\n  query {\n    character(id: \"1000\") { name }\n  }\n\"\"\"\n\nval res: IO[Json] = StarWarsMapping.compileAndRun(query)\n\n// res produces:\n// { \"data\": { \"character\": { \"name\": \"Luke Skywalker\" } } }",
+      "explanation": "compileAndRun is the high-level entry that elaborates the query and drives QueryInterpreter.run end-to-end (runOneShot -> runValue/runFields -> completeAll). This is how the interpreter is exercised in practice; the Cursor walking happens internally. From DerivationSuite 'simple query'. needsDb=false because the generic StarWars data is in-memory.",
+      "needsDb": false
+    },
+    {
+      "title": "Construct a ProtoJson and complete it",
+      "code": "import grackle.QueryInterpreter.ProtoJson\nimport io.circe.Json\nimport cats.effect.IO\n\n// A fully-concrete ProtoJson collapses straight to Json\nval pj: ProtoJson = ProtoJson.fromFields(Seq(\n  \"a\" -> ProtoJson.fromJson(Json.fromInt(1)),\n  \"b\" -> ProtoJson.fromJson(Json.fromString(\"x\"))\n))\nassert(!ProtoJson.isDeferred(pj))\n\nval completed: IO[Result[Json]] = QueryInterpreter.complete[IO](pj)\n// completed == Result.Success({ \"a\": 1, \"b\": \"x\" })",
+      "explanation": "ProtoJson is the interpreter's partial-result type. When every field is already Json, fromFields/fromDisjointFields collapse to a plain Json node, isDeferred is false, and complete returns it unchanged. Deferred subtrees (component/effect) would instead require batched resolution inside completeAll. Derived from the ProtoJson public API in queryinterpreter.scala.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "Cursor navigation methods return Result, never throw, and have permissive error defaults. AbstractCursor.field/asLeaf/asList/asNullable/preunique all default to Result.internalError, so calling the wrong one for the focus type yields an error Result rather than a compile error or exception - you must match the method to the cursor's actual type (checked via isLeaf/isList/isNullable first).",
+    "focus is typed Any and the value/type must agree. ValueCursor.isList is true only when BOTH tpe is a ListType AND focus is a List[_]; a ListType tpe with a non-list focus silently reports isList=false and asList errors. Always keep the backing value in sync with the Context type.",
+    "Context.equals and hashCode are deliberately partial: equals ignores typePath (compares rootTpe via =:= plus path and resultPath only) and hashCode is just resultPath.hashCode. Two contexts at the same alias path but different concrete types compare equal - relevant if you key maps on Context.",
+    "path/resultPath/typePath are stored innermost-first (reversed). Context.forField prepends, and code that renders a path does context.path.reverse.mkString(\"/\"). Don't assume root-to-leaf ordering.",
+    "asNullable returns Result[Option[Cursor]] - two layers. A present nullable is Result.Success(Some(c)); absent is Result.Success(None); a type mismatch is Result.internalError. The interpreter maps None to Json.Null. Forgetting the Option layer (e.g. expecting a Cursor directly) is a common mistake.",
+    "preunique does NOT return the unique element - it re-types the focus as a list (tpe.nonNull.list) so the caller (runValue's Unique case) can then runList with unique=true. runList then errors with 'No match' (size 0, non-nullable), 'Multiple matches' (size > 1), or returns null (size 0, nullable).",
+    "cursorCompatible is enforced at the start of runValue, runFields, and inside runList's element loop. If a custom Cursor reports a tpe that doesn't strip-match the query type, you get 'Mismatched query and cursor type in runValue/runFields/runList' internal errors rather than a useful message - keep mkChild/asType context re-typing correct.",
+    "ProtoJson is an opaque type (type ProtoJson <: AnyRef) whose internal cases (DeferredJson/EffectJson/ProtoObject/ProtoArray/ProtoSelect) are package-private to QueryInterpreter. You can only build it via the ProtoJson.* constructors and inspect via isDeferred - you cannot pattern-match its structure from outside the module.",
+    "Constructors collapse eagerly: fromFields/fromDisjointFields/fromValues/select return plain Json the moment all children are Json. So isDeferred is frequently false even for objects/arrays; deferral only appears when a component/effect leaf is present. Tests that assert on deferral must include a real deferred subtree.",
+    "fromDisjointFields assumes field names are disjoint and does NOT merge duplicates (it just wraps), whereas fromFields calls mergeFields first. runFields uses fromDisjointFields for the object case but pre-merges via mergeFields in the Group-with-type-case path - mixing them up can produce duplicate keys.",
+    "completeAll substitutes deferred results using a java.util.IdentityHashMap keyed on the DeferredJson nodes - results are matched by object identity, not equality. Re-creating or copying an EffectJson node after it has been gathered would break the substitution.",
+    "runOneShot turns a top-level Result.Failure into Result.Warning(errs, ProtoJson.fromJson(Json.Null)) so the response is data:null + errors. This means a hard failure at the root still yields a Success/Warning-shaped Json result downstream - check for Warning problems, not just Failure, when inspecting errors.",
+    "RootStream is only valid in subscriptions: runOneShot returns an internalError 'RootStream only permitted in subscriptions' if a root-stream field appears in a non-subscription query, and runSubscription rejects more than one root selection ('Only one root selection permitted for subscriptions').",
+    "DeferredCursor.field errors unless the requested fieldName equals deferredPath.head; it walks the fixed path one step at a time and only invokes mkCursor at the final step. It cannot be used to navigate arbitrary fields - only the pre-declared path.",
+    "Env.get is type-checked at runtime via classTag[T].unapply, so a key present but stored as the wrong type returns None (not an error). Use envR/getR to get a descriptive Result error instead of a silent None."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "test 'primitive types have leaf cursor builders' (lines ~236-268)",
+      "whatItShows": "Building leaf cursors for Int/String/Boolean/Double via CursorBuilder and rendering with asLeaf; canonical isLeaf + asLeaf usage."
+    },
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "test 'product types have cursor builders' (lines ~294-303)",
+      "whatItShows": "field + asNullable + asLeaf chain to read a nullable scalar field off a product cursor."
+    },
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "test 'cursor builders can be resolved for nested types' (lines ~305-319)",
+      "whatItShows": "asNullable then asList(List) then traverse(_.asLeaf) - list traversal over cursors."
+    },
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "test 'sealed ADTs have narrowable cursor builders' (lines ~342-353)",
+      "whatItShows": "narrow(subtype) to access a subtype-only field on an interface/ADT cursor."
+    },
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "test 'default cursor builders can be customised by mapping fields' (lines ~321-340)",
+      "whatItShows": "Deeper nested traversal: field -> asNullable -> asList -> field -> asNullable -> asLeaf across a list of child cursors."
+    },
+    {
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "region": "case class ValueCursor (lines 140-216)",
+      "whatItShows": "A complete, compiling reference implementation of Cursor over plain Scala values - the clearest template for asList/asNullable/preunique/narrowsTo/narrow/isLeaf, matching on (tpe, focus)."
+    },
+    {
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "region": "case class CirceCursor (lines 98-200+)",
+      "whatItShows": "Cursor implementation over io.circe.Json showing how asLeaf validates each scalar/enum against the Json shape and how narrowsTo checks required-field presence."
+    },
+    {
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "region": "object Cursor: AbstractCursor (lines 260-293) and ProxyCursor (lines 298-333)",
+      "whatItShows": "The two base classes every concrete cursor extends, with the default error implementations and the delegation pattern."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "runValue (lines 413-500)",
+      "whatItShows": "The type-directed dispatch table - the single best snippet for explaining how (query, tpe.dealias) maps to asLeaf / runFields / runList / asNullable / Unique / Component / TransformCursor."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "runFields (lines 201-308)",
+      "whatItShows": "How object/interface/union selections, __typename, Count, Narrow, Component and Environment are turned into (resultName, ProtoJson) field pairs."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "object ProtoJson (lines 503-697)",
+      "whatItShows": "The full public ProtoJson constructor/merge API plus the package-private deferred case classes - reference for ProtoJson docs."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "completeAll (lines 728-814)",
+      "whatItShows": "gatherDeferred / scatterResults / batched effect resolution with IdentityHashMap substitution - the staged-completion algorithm."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "RootCursor + defaultRootCursor (lines 124-144)",
+      "whatItShows": "How the interpreter obtains its starting cursor and how field() bridges into the mapping via mkCursorForField."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Cursor API reference",
+      "diataxisType": "reference",
+      "outline": [
+        "The Cursor trait: focus, tpe, context, parent, path/resultPath, env",
+        "Type predicates and accessors: isLeaf/asLeaf, isList/asList/listSize, isNullable/asNullable/isDefined/isNull",
+        "Field navigation: field, fieldAs, nullableField, path/listPath/flatListPath",
+        "Narrowing: narrowsTo and narrow",
+        "Unique support: preunique and its relationship to runList",
+        "Casting and environment: as, env/envR/fullEnv/withEnv",
+        "Companion helpers: Cursor.flatten",
+        "Provided base/proxy cursors: AbstractCursor, ProxyCursor, EmptyCursor, NullCursor, NullFieldCursor, ListTransformCursor, DeferredCursor",
+        "Each method's exact signature, return type, and default behaviour"
+      ]
+    },
+    {
+      "title": "Context and Env reference",
+      "diataxisType": "reference",
+      "outline": [
+        "Context fields: rootTpe, path, resultPath, typePath; tpe derivation",
+        "Reversed (innermost-first) path ordering",
+        "Derivations: asType, forField, forFieldOrAttribute, forPath, parent, forUnderlyingNamed",
+        "Context companion constructors (Type, Type+field, Path)",
+        "equals/hashCode semantics and their caveats",
+        "Env: EmptyEnv vs NonEmptyEnv, add/get/getR/contains, addFromQuery, type-checked lookups"
+      ]
+    },
+    {
+      "title": "How the query interpreter works",
+      "diataxisType": "explanation",
+      "outline": [
+        "From query + root cursor to JSON: run -> runOneShot/runSubscription -> runRootValue",
+        "Type-directed dispatch in runValue ((query, tpe.dealias) table)",
+        "Object/interface/union selection in runFields; __typename and Count",
+        "List handling in runList: filter/order/offset/limit, Unique, ListTransformCursor",
+        "cursorCompatible guards and why mismatches surface as internal errors",
+        "ProtoJson: the partial-result tree and eager collapse to Json",
+        "Deferred/staged evaluation: component/effect, gatherDeferred, batching, scatterResults via IdentityHashMap",
+        "Error accumulation: the Result four-arm model, Warning vs Failure, root Failure -> data:null+errors"
+      ]
+    },
+    {
+      "title": "Implementing a custom Cursor for your data model",
+      "diataxisType": "how-to",
+      "outline": [
+        "Choose a base: extend Cursor directly vs AbstractCursor vs ProxyCursor",
+        "Pair focus (Any/your value type) with the Context type; the mkChild + context.asType pattern",
+        "Implement isLeaf/asLeaf for your scalars and enums (CirceCursor as a worked example)",
+        "Implement isList/asList/listSize and isNullable/asNullable/isDefined",
+        "Implement narrowsTo/narrow for interface/union members",
+        "Implement preunique for Unique queries",
+        "Wire field() into your Mapping via mkCursorForField / RootCursor",
+        "Reference implementations to copy from: ValueCursor and CirceCursor"
+      ]
+    },
+    {
+      "title": "Navigating results with Cursor (tutorial)",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Set up a generic Mapping with CursorBuilder derivation (StarWars example)",
+        "Build a cursor with CursorBuilder[T].build(Context(tpe), value)",
+        "Read a scalar field: field + asNullable + asLeaf",
+        "Traverse a list field with asList and traverse",
+        "Narrow an interface to a concrete subtype to reach subtype-only fields",
+        "Run the full query end-to-end with compileAndRun and compare output JSON",
+        "Where to look when you get 'Mismatched query and cursor type' or 'missing' errors"
+      ]
+    },
+    {
+      "title": "ProtoJson and result completion reference",
+      "diataxisType": "reference",
+      "outline": [
+        "The opaque ProtoJson type and what it represents",
+        "Constructors: fromJson, fromFields, fromDisjointFields, fromValues, select",
+        "Deferred constructors: component, effect (EffectJson)",
+        "Inspection: isDeferred; merge helpers mergeProtoJson/mergeProtoObjects/mergeProtoArrays/mergeFields",
+        "complete and completeAll: batching by (mapping, handler), recursion, substitution",
+        "EffectHandler.runEffects contract",
+        "combineResults / combineAllWithDefault and error-preserving combination"
+      ]
+    }
+  ]
+}

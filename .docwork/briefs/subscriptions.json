@@ -1,0 +1,218 @@
+{
+  "subsystem": "Subscriptions",
+  "summary": "Grackle implements GraphQL subscriptions by allowing the root fields of the schema's `Subscription` type to be mapped to `RootStream` field mappings, whose effect produces an `fs2.Stream` of results rather than a single value. Each element emitted by the stream re-runs the rest of the subscription query (the \"child\" selection) and produces one GraphQL JSON response, so the public entry point `Mapping#compileAndRunSubscription` returns an `fs2.Stream[F, Json]` that emits one JSON document per upstream event. A `RootStream` can compute a stream of cursors directly (`RootStream.computeCursor`), a stream of effect-specific child queries that are executed against the mapping's default root cursor (`RootStream.computeChild`), or both query and cursor (`RootStream.apply`); a plain `RootEffect` is also accepted in a subscription position and is automatically lifted via `toRootStream` (emitting exactly one element). The skunk backend demonstrates the canonical pattern: a Postgres `LISTEN`/`NOTIFY` channel (`Session#channel(...).listen(...)`) drives the stream, and each notification carries an id used to build a `Unique(Filter(...))` child query that fetches the affected row. Subscriptions are restricted to exactly one root selection and `RootStream` is only legal under the `Subscription` operation type — using it elsewhere (or returning more than one root selection) is a runtime internal error.",
+  "keyConcepts": [
+    {
+      "name": "RootStream (stream-valued root)",
+      "explanation": "An `EffectMapping` placed on a `Subscription` root field whose `effect` returns an `fs2.Stream[F, Result[(Query, Cursor)]]`. Each emitted element drives one full re-interpretation of the subscription's child selection, yielding one response. This is the core mechanism that turns a single GraphQL subscription operation into a stream of JSON responses."
+    },
+    {
+      "name": "compileAndRunSubscription",
+      "explanation": "The public Mapping method that compiles a subscription (or any operation) and returns `Stream[F, Json]`. For a `Subscription` operation it dispatches to `runSubscription`; for `Query`/`Mutation` it produces a single-element stream. `compileAndRun` is implemented on top of it by collecting the stream and asserting exactly one element, so mutations/queries reuse the same machinery."
+    },
+    {
+      "name": "computeCursor vs computeChild vs apply",
+      "explanation": "Three ways to build a RootStream. `computeCursor(field)((path, env) => Stream[F, Result[Cursor]])` emits cursors and leaves the elaborated client query unchanged (used when the data is materialised in-process, e.g. ValueMapping/Circe). `computeChild(field)((child, path, env) => Stream[F, Result[Query]])` emits a transformed child query that is run against the mapping's default root cursor (used by SQL backends so each event re-queries the DB). `apply(field)(effect)` gives full control over both query and cursor."
+    },
+    {
+      "name": "RootEffect.toRootStream lifting",
+      "explanation": "A `RootEffect` (used for queries/mutations) placed in a subscription position is accepted and wrapped via `toRootStream`, which lifts its single `F[Result[(Query,Cursor)]]` into a one-element stream with `Stream.eval`. So a subscription field need not literally be a RootStream, though RootStream is the idiomatic choice."
+    },
+    {
+      "name": "Postgres LISTEN/NOTIFY via skunk",
+      "explanation": "The recommended real-data subscription source: `Session#channel(id\"...\")` gives a skunk `Channel`; `.listen(maxQueued)` yields an `fs2.Stream` of notifications and `.notify(payload)` publishes. In Grackle the listen stream lives inside a `RootStream.computeChild` body (opened via `fs2.Stream.resource(pool)`), and each notification's payload (a city id here) is used to build a `Unique(Filter(Eql(CityType / \"id\", Const(id)), child))` query that fetches and emits the changed row."
+    },
+    {
+      "name": "Single root selection / Subscription-only restriction",
+      "explanation": "Subscriptions permit exactly one root field selection (more than one is an internal error). Conversely a `RootStream` is only legal under the Subscription type — encountering one while running a non-subscription operation is also an internal error. These invariants are enforced in `QueryInterpreter.runSubscription`/`runOneShot`."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "RootStream (case class)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootStream private (fieldName: String, effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false }",
+      "purpose": "The field mapping that backs a subscription root field. Its effect yields an fs2.Stream; each emitted (Query, Cursor) is interpreted to produce one response in the output stream. Nested inside `abstract class Mapping[F[_]]`, so it is path-dependent on a Mapping instance."
+    },
+    {
+      "name": "RootStream.apply",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def apply(fieldName: String)(effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]])(implicit pos: SourcePos, di: DummyImplicit): RootStream",
+      "purpose": "Construct a RootStream with full control over both the per-event query and cursor. The DummyImplicit disambiguates this overload's erased signature from the others."
+    },
+    {
+      "name": "RootStream.computeCursor",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeCursor(fieldName: String)(effect: (Path, Env) => Stream[F, Result[Cursor]])(implicit pos: SourcePos): RootStream",
+      "purpose": "Build a RootStream that emits a stream of cursors while keeping the elaborated client query unchanged. Used when data is produced in-process (e.g. ValueMapping with `valueCursor`). The most common form for non-SQL subscriptions."
+    },
+    {
+      "name": "RootStream.computeChild",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeChild(fieldName: String)(effect: (Query, Path, Env) => Stream[F, Result[Query]])(implicit pos: SourcePos): RootStream",
+      "purpose": "Build a RootStream that emits a stream of transformed child queries, each executed against the mapping's default root cursor. The canonical form for SQL backends: each upstream event yields a query (e.g. a Unique/Filter) that re-reads the affected rows. The `child` argument is the already-elaborated selection set."
+    },
+    {
+      "name": "RootEffect.toRootStream",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def toRootStream: RootStream = RootStream(fieldName)((q, p, e) => Stream.eval(effect(q, p, e)))",
+      "purpose": "Lifts a (single-shot) RootEffect into a one-element RootStream so that RootEffect-mapped fields can also serve as subscription roots."
+    },
+    {
+      "name": "Mapping#compileAndRunSubscription",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRunSubscription(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty): Stream[F, Json]",
+      "purpose": "Public entry point: compile a GraphQL document and run it as a subscription, yielding a stream of JSON responses (one per upstream event). Also used to back `compileAndRun` for queries/mutations (which expect exactly one element)."
+    },
+    {
+      "name": "Mapping#compileAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRun(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty)(implicit sc: Compiler[F, F]): F[Json]",
+      "purpose": "Run a single query or mutation, returning one JSON document. Implemented by collecting `compileAndRunSubscription(...).compile.toList` and asserting exactly one result; errors if the stream is empty or has more than one element."
+    },
+    {
+      "name": "QueryInterpreter#runSubscription",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def runSubscription(query: Query, rootTpe: Type, rootCursor: Cursor): Stream[F, Result[ProtoJson]]",
+      "purpose": "The interpreter routine that drives a subscription. It ungroups the query, requires exactly one root selection, looks up the field's RootStream (falling back to a RootEffect lifted via toRootStream), runs the effect to get a Stream, and maps each emitted (query, cursor) through `runValue`."
+    },
+    {
+      "name": "Mapping#rootStream",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def rootStream(context: Context, fieldName: String): Option[RootStream]",
+      "purpose": "Yields the RootStream, if any, associated with a field in a given context. Used by the interpreter to discover the subscription source for a root field."
+    },
+    {
+      "name": "EffectMapping (trait)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait EffectMapping extends FieldMapping { def subtree: Boolean = true }",
+      "purpose": "Common supertype of RootEffect, RootStream and EffectField. Determines that the field mapping carries an effect and owns a subtree of the result."
+    },
+    {
+      "name": "SkunkMappingCompanion#mkMapping",
+      "file": "modules/skunk/shared/src/main/scala/SkunkMappingCompanion.scala",
+      "signature": "def mkMapping[F[_]: Sync](pool: Resource[F, Session[F]], monitor: SkunkMonitor[F]): Mapping[F]  /  final def mkMapping[F[_]: Sync](pool: Resource[F, Session[F]]): Mapping[F] = mkMapping(pool, SkunkMonitor.noopMonitor)",
+      "purpose": "Factory for skunk-backed mappings (including subscription mappings). The single-arg overload defaults the monitor to a no-op. The `pool` Resource is also available inside the mapping as `pool` for opening sessions to LISTEN."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "In-process subscription with ValueMapping + SignallingRef",
+      "code": "import scala.concurrent.duration._\nimport cats.effect._\nimport cats.implicits._\nimport fs2.concurrent.SignallingRef\nimport io.circe.Json\nimport grackle._\nimport grackle.QueryCompiler._\nimport grackle.syntax._\n\ndef mapping(ref: SignallingRef[IO, Int]): Mapping[IO] =\n  new ValueMapping[IO] {\n    val schema: Schema =\n      schema\"\"\"\n        type Query        { get: Int! }\n        type Mutation     { put(n: Int): Int! }\n        type Subscription { watch: Int! }\n      \"\"\"\n\n    val QueryType        = schema.ref(\"Query\")\n    val MutationType     = schema.ref(\"Mutation\")\n    val SubscriptionType = schema.ref(\"Subscription\")\n\n    val typeMappings = List(\n      ObjectMapping(QueryType, List(\n        RootEffect.computeCursor(\"get\")((path, env) =>\n          ref.get.map(n => Result(valueCursor(path, env, n)))))),\n      ObjectMapping(MutationType, List(\n        RootEffect.computeCursor(\"put\")((path, env) =>\n          env.get[Int](\"n\") match {\n            case None    => Result.failure(s\"`n: Int` not found in $env\").pure[IO]\n            case Some(n) => ref.set(n).map(_ => Result(valueCursor(path, env, n)))\n          }))),\n      ObjectMapping(SubscriptionType, List(\n        // stream-valued root: one response per distinct value\n        RootStream.computeCursor(\"watch\")((path, env) =>\n          ref.discrete.map(n => Result(valueCursor(path, env, n))))))\n    )\n\n    override val selectElaborator: SelectElaborator = SelectElaborator {\n      case (MutationType, \"put\", List(Query.Binding(\"n\", Value.IntValue(n)))) =>\n        Elab.env(\"n\" -> n)\n    }\n  }\n\n// Run: subscribe in a fiber, mutate, collect emissions.\nval prog: IO[List[Json]] =\n  for {\n    ref <- SignallingRef[IO, Int](0)\n    map  = mapping(ref)\n    fib <- map.compileAndRunSubscription(\"subscription { watch }\")\n             .take(4).compile.toList.start\n    _ <- IO.sleep(100.milli)\n    _ <- map.compileAndRun(\"mutation { put(n: 123) }\")\n    _ <- IO.sleep(100.milli)\n    _ <- map.compileAndRun(\"mutation { put(n: 42) }\")\n    _ <- IO.sleep(100.milli)\n    _ <- map.compileAndRun(\"mutation { put(n: 77) }\")\n    _ <- IO.sleep(100.milli)\n    out <- fib.join\n    res <- out.embedNever\n  } yield res\n// res == [ {watch:0}, {watch:123}, {watch:42}, {watch:77} ] (wrapped in {\"data\": ...})",
+      "explanation": "The complete in-process subscription pattern, taken verbatim from modules/core/src/test/scala/subscription/SubscriptionSuite.scala. `RootStream.computeCursor` wires the `watch` subscription field to `ref.discrete` (an fs2.Stream of the SignallingRef's values); each emitted value becomes one `{\"data\":{\"watch\": n}}` response. `valueCursor(path, env, n)` builds the cursor for the leaf result. Note the explicit `IO.sleep` between mutations: subscription delivery is asynchronous and the test races the subscriber against the producer. `embedNever` is fs2's helper for unwrapping the fiber Outcome.",
+      "needsDb": false
+    },
+    {
+      "title": "Postgres LISTEN/NOTIFY subscription via skunk (RootStream.computeChild)",
+      "code": "import cats.effect.{Resource, Sync}\nimport skunk.Session\nimport skunk.codec.all._\nimport skunk.implicits._\nimport grackle._\nimport grackle.Predicate._\nimport grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\nimport grackle.skunk._\nimport grackle.syntax._\n\ntrait SubscriptionMapping[F[_]] extends SkunkMapping[F] {\n  val schema =\n    schema\"\"\"\n      type Query        { city(id: Int!): City }\n      type Subscription { channel: City! }\n      type City    { name: String!, country: Country!, population: Int! }\n      type Country { name: String!, cities: [City!]! }\n    \"\"\"\n\n  object country extends TableDef(\"country\") {\n    val code = col(\"code\", bpchar(3)); val name = col(\"name\", text)\n  }\n  object city extends TableDef(\"city\") {\n    val id = col(\"id\", int4); val countrycode = col(\"countrycode\", bpchar(3))\n    val name = col(\"name\", text); val population = col(\"population\", int4)\n  }\n\n  val QueryType        = schema.ref(\"Query\")\n  val SubscriptionType = schema.ref(\"Subscription\")\n  val CountryType      = schema.ref(\"Country\")\n  val CityType         = schema.ref(\"City\")\n\n  val typeMappings = List(\n    ObjectMapping(QueryType, List(SqlObject(\"city\"))),\n    ObjectMapping(CountryType, List(\n      SqlField(\"code\", country.code, key = true, hidden = true),\n      SqlField(\"name\", country.name),\n      SqlObject(\"cities\", Join(country.code, city.countrycode)))),\n    ObjectMapping(CityType, List(\n      SqlField(\"id\", city.id, key = true, hidden = true),\n      SqlField(\"countrycode\", city.countrycode, hidden = true),\n      SqlField(\"name\", city.name),\n      SqlField(\"population\", city.population),\n      SqlObject(\"country\", Join(city.countrycode, country.code)))),\n    ObjectMapping(SubscriptionType, List(\n      // each Postgres NOTIFY on city_channel carries a city id;\n      // build a child query that fetches that one city.\n      RootStream.computeChild(\"channel\")((child, _, _) =>\n        for {\n          s  <- fs2.Stream.resource(pool)\n          id <- s.channel(id\"city_channel\").listen(256).map(_.value.toInt)\n        } yield Unique(Filter(Eql(CityType / \"id\", Const(id)), child)).success)))\n  )\n\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"city\", List(Binding(\"id\", IntValue(id)))) =>\n      Elab.transformChild(child => Unique(Filter(Eql(CityType / \"id\", Const(id)), child)))\n  }\n}\n\nobject SubscriptionMapping extends SkunkMappingCompanion {\n  def mkMapping[F[_]: Sync](pool: Resource[F, Session[F]], monitor: SkunkMonitor[F]): Mapping[F] =\n    new SkunkMapping[F](pool, monitor) with SubscriptionMapping[F]\n}\n\n// Driving it (from the skunk SubscriptionSuite):\nval query = \"\"\"\n  subscription { channel { name country { name } } }\n\"\"\"\nval prog: IO[List[Json]] =\n  for {\n    fi <- mapping.compileAndRunSubscription(query).take(2).compile.toList.start\n    _  <- IO.sleep(1.second)                  // race: let the listener attach first\n    _  <- pool.use { s =>\n            val ch = s.channel(id\"city_channel\").contramap[Int](_.toString)\n            List(101, 102, 103).traverse_(ch.notify)\n          }\n    out <- fi.join\n    js  <- out.embedNever\n  } yield js",
+      "explanation": "The complete Postgres LISTEN/NOTIFY worked example, assembled verbatim from modules/skunk/js-jvm/src/test/scala/subscription/SubscriptionMapping.scala and SubscriptionSuite.scala. The subscription source is `s.channel(id\"city_channel\").listen(256)` — an fs2.Stream of skunk notifications opened over a session from `pool` (the SkunkMapping's connection pool). Each notification's `.value` (a stringified city id) is parsed and used to build `Unique(Filter(Eql(CityType / \"id\", Const(id)), child))`, where `child` is the elaborated `{ name country { name } }` selection; Grackle then issues the SQL to read that city and emits one response per NOTIFY. `.success` lifts the Query into `Result[Query]`. The driver publishes with `channel(...).contramap[Int](_.toString).notify(...)`. The `IO.sleep(1.second)` avoids a race where notifications fire before LISTEN is registered.",
+      "needsDb": true
+    },
+    {
+      "title": "Circe-backed stream root via RootStream.computeJson",
+      "code": "import grackle.circe.CirceMapping  // brings CirceMappingRootStreamSyntax into scope\nimport io.circe.Json\n\n// Inside a CirceMapping[F], on the Subscription type:\nObjectMapping(SubscriptionType, List(\n  RootStream.computeJson(\"events\")((path, env) =>\n    someEventStream.map(json => Result(json)))   // Stream[F, Result[Json]]\n))\n// or, for an encodable type A with an io.circe.Encoder[A]:\nObjectMapping(SubscriptionType, List(\n  RootStream.computeEncodable(\"events\")((path, env) =>\n    someEventStream.map(a => Result(a)))          // Stream[F, Result[A]]\n))",
+      "explanation": "When the data is already Circe JSON (or has a circe Encoder), `RootStream.computeJson` / `computeEncodable` (added by the implicit `CirceMappingRootStreamSyntax` in modules/circe/src/main/scala/circemapping.scala) build a RootStream directly from a `Stream[F, Result[Json]]`/`Stream[F, Result[A]]`, internally delegating to `computeCursor` with `circeCursor`. Mirrors the RootEffect.computeJson/computeEncodable helpers used for query/mutation roots.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "Subscriptions allow exactly one root selection. `runSubscription` returns `Result.internalError(\"Only one root selection permitted for subscriptions\")` if the operation selects more than one top-level field (see modules/core/src/main/scala/queryinterpreter.scala).",
+    "A `RootStream` is only valid under the `Subscription` operation type. If a query/mutation reaches a RootStream-mapped field, `runOneShot` short-circuits with `Result.internalError(\"RootStream only permitted in subscriptions\")`. Conversely, a subscription field with no RootStream/RootEffect yields `\"EffectMapping required for subscriptions\"`.",
+    "`compileAndRun` (for queries/mutations) is built on `compileAndRunSubscription` and asserts the result stream has exactly one element — it raises IllegalStateException(\"Result stream was empty.\") on an empty stream or \"...contained N results; expected exactly one.\" otherwise. Don't point it at a true subscription.",
+    "Delivery is asynchronous and racy. Both test suites insert `IO.sleep` (100ms in core, 1s for Postgres) between starting the subscriber fiber and producing events, because the subscriber must attach (and, for Postgres, register LISTEN) before notifications are sent. The core suite even comments \"this is the best we can do for now\". Production code must account for this ordering window; events fired before the listener is ready are lost.",
+    "`RootStream.computeChild`'s effect receives the already-elaborated `child` selection (not the full root query) and must return a `Result[Query]` that wraps/extends it; in the skunk example it wraps `child` in `Unique(Filter(...))`. Returning a query of the wrong shape, or failing to incorporate `child`, breaks the result. `extractChild`/`substChild` are used internally and an unexpected query shape yields `Result.internalError(\"Root query has unexpected shape\")`.",
+    "`RootStream.apply`, `computeCursor` and `computeChild` share an erased signature, so the `apply` overload carries a `DummyImplicit` to disambiguate. Use the named `computeCursor`/`computeChild`/`computeJson` helpers in user code to avoid overload-resolution surprises.",
+    "The Postgres `Channel` payload is always a String. In the skunk example the producer does `channel(id\"city_channel\").contramap[Int](_.toString).notify(...)` and the consumer does `.listen(256).map(_.value.toInt)`. You are responsible for encoding/parsing the payload yourself; there is no typed channel.",
+    "`Session#channel(...).listen(maxQueued)` takes a bounded queue size (256 in the example). Notifications beyond the buffer while the consumer is slow can be dropped by skunk — choose the bound deliberately.",
+    "For SQL subscriptions you open a *new* session for the LISTEN stream via `fs2.Stream.resource(pool)` inside the RootStream body; the per-event child query then runs against the mapping's own pool. Each emitted event triggers a fresh SQL round-trip (re-querying the row), so a high notification rate means high query load.",
+    "Mutations within a single GraphQL mutation operation execute serially in selection order (see the \"serial execution\" test putting n:1, n:2, n:3). This matters when a mutation is the producer feeding a subscription — ordering of resulting subscription emissions follows the serialized mutations, but only up to the async delivery window above."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala",
+      "region": "def mapping(ref: SignallingRef[IO, Int]) (lines 33-85) and the \"subscription\" test (lines 198-257)",
+      "whatItShows": "A complete, compiling in-process subscription: a ValueMapping with Query/Mutation/Subscription, a `RootStream.computeCursor(\"watch\")` driven by `ref.discrete`, and a test that subscribes in a fiber, mutates, and asserts the exact sequence of JSON responses. Ideal verbatim snippet for the explanation/how-to pages."
+    },
+    {
+      "file": "modules/skunk/js-jvm/src/test/scala/subscription/SubscriptionMapping.scala",
+      "region": "trait SubscriptionMapping (lines 31-111) and object SubscriptionMapping (lines 113-118)",
+      "whatItShows": "The canonical Postgres LISTEN/NOTIFY subscription mapping: schema with a Subscription type, SQL table/field mappings, and `RootStream.computeChild(\"channel\")` opening a skunk channel via `pool`, listening, and building `Unique(Filter(Eql(CityType / \"id\", Const(id)), child)))`. The companion shows the SkunkMappingCompanion factory."
+    },
+    {
+      "file": "modules/skunk/js-jvm/src/test/scala/subscription/SubscriptionSuite.scala",
+      "region": "test(\"subscription driven by a Postgres channel\") (lines 32-96)",
+      "whatItShows": "How to drive the skunk subscription end to end: start `compileAndRunSubscription(query).take(2)` in a fiber, sleep, publish via `channel(id\"city_channel\").contramap[Int](_.toString).notify`, rejoin and assert the JSON results. Requires a live Postgres (SkunkDatabaseSuite)."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "RootStream case class + object (lines 1263-1324) and RootEffect (lines 1181-1249)",
+      "whatItShows": "Authoritative signatures and scaladoc for RootStream.apply/computeCursor/computeChild and RootEffect.toRootStream. Snip the scaladoc comments and signatures directly into the reference page."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "runSubscription (lines 61-85) and the hasRootStream guard in runOneShot (lines 96-105)",
+      "whatItShows": "The execution model: how one root selection is required, how RootStream is resolved (falling back to RootEffect.toRootStream), and the guards that enforce subscription-only RootStream usage. Good for the explanation page describing internals."
+    },
+    {
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "region": "CirceMappingRootStreamSyntax (lines 49-58)",
+      "whatItShows": "The Circe-specific RootStream.computeJson / computeEncodable convenience builders for JSON/encodable stream roots."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "compileAndRunSubscription (lines 79-97) and compileAndRun (lines 53-77)",
+      "whatItShows": "The public API surface: exact signatures and the relationship between compileAndRun and compileAndRunSubscription (the former asserts a single-element stream)."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Subscriptions: RootStream reference",
+      "diataxisType": "reference",
+      "outline": [
+        "compileAndRunSubscription vs compileAndRun: signatures and return types (Stream[F, Json] vs F[Json])",
+        "RootStream case class and its `effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]]`",
+        "Builders: RootStream.apply, computeCursor, computeChild (full signatures, when each applies)",
+        "RootEffect.toRootStream lifting and EffectMapping supertype",
+        "Backend-specific helpers: Circe RootStream.computeJson / computeEncodable",
+        "Mapping#rootStream / rootEffect lookup helpers",
+        "Runtime invariants & error messages (one root selection, subscription-only RootStream)"
+      ]
+    },
+    {
+      "title": "How Grackle subscriptions work",
+      "diataxisType": "explanation",
+      "outline": [
+        "GraphQL subscriptions as a stream of responses, one per upstream event",
+        "Where subscription roots live: the schema Subscription type mapped to a RootStream",
+        "Execution flow: run -> runSubscription -> resolve RootStream -> per-element runValue",
+        "computeCursor (in-process data) vs computeChild (re-query a backend per event)",
+        "How the elaborated child selection is wrapped/substituted (extractChild/substChild)",
+        "Async delivery and the listener-attach race window"
+      ]
+    },
+    {
+      "title": "Add a GraphQL subscription with Postgres LISTEN/NOTIFY (skunk)",
+      "diataxisType": "how-to",
+      "outline": [
+        "Define the Subscription type in the schema",
+        "Map the root field with RootStream.computeChild and open a skunk channel from `pool`",
+        "Listen: s.channel(id\"...\").listen(maxQueued).map(_.value.toInt)",
+        "Build the per-event child query: Unique(Filter(Eql(Type / \"id\", Const(id)), child))",
+        "Wire up SkunkMappingCompanion.mkMapping",
+        "Publish notifications with channel(...).contramap.notify and parse payloads",
+        "Run it: compileAndRunSubscription(...).take(n) in a fiber; handling the attach race"
+      ]
+    },
+    {
+      "title": "In-process subscriptions with ValueMapping / Circe",
+      "diataxisType": "how-to",
+      "outline": [
+        "Use a fs2 source (e.g. SignallingRef.discrete or a Topic) as the event stream",
+        "Map the subscription field with RootStream.computeCursor + valueCursor",
+        "Circe variant: RootStream.computeJson / computeEncodable",
+        "Consume the stream: take / compile / running in a fiber",
+        "Testing pattern with sleeps to avoid the delivery race"
+      ]
+    }
+  ]
+}

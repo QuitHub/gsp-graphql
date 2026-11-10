@@ -1,0 +1,154 @@
+{
+  "docs/index.md": [
+    "http-integration-running-operations",
+    "mappings-core-catalog"
+  ],
+  "docs/getting-started/overview.md": [
+    "query-algebra-compiler-elaboration",
+    "cursor-query-interpreter",
+    "mappings-core-catalog"
+  ],
+  "docs/getting-started/install.md": [],
+  "docs/getting-started/quick-start.md": [
+    "mappings-core-catalog",
+    "query-algebra-compiler-elaboration",
+    "predicates-filtering-ordering-paging"
+  ],
+  "docs/tutorial/intro.md": [],
+  "docs/tutorial/in-memory-model.md": [
+    "mappings-core-catalog",
+    "generic-derivation-backend"
+  ],
+  "docs/tutorial/db-backed-model.md": [
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb"
+  ],
+  "docs/tutorial/mutations-subscriptions.md": [
+    "mutations",
+    "subscriptions",
+    "effects-batching"
+  ],
+  "docs/how-to/filtering-ordering-paging.md": [
+    "predicates-filtering-ordering-paging",
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb"
+  ],
+  "docs/how-to/compose-mappings.md": [
+    "composition-federation-of-mappings"
+  ],
+  "docs/how-to/sql-backends.md": [
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb",
+    "http-integration-running-operations"
+  ],
+  "docs/how-to/interfaces-unions.md": [
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb",
+    "graphql-schema-sdl"
+  ],
+  "docs/how-to/jsonb-columns.md": [
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb"
+  ],
+  "docs/how-to/custom-scalars-enums.md": [
+    "graphql-schema-sdl",
+    "mappings-core-catalog"
+  ],
+  "docs/how-to/schema-directives.md": [
+    "graphql-schema-sdl",
+    "introspection-directives-fragments-variables"
+  ],
+  "docs/how-to/query-directives.md": [
+    "introspection-directives-fragments-variables",
+    "query-algebra-compiler-elaboration"
+  ],
+  "docs/how-to/effects-batching.md": [
+    "effects-batching"
+  ],
+  "docs/how-to/errors.md": [
+    "result-errors-problem"
+  ],
+  "docs/how-to/validate-mappings.md": [
+    "mappings-core-catalog",
+    "graphql-schema-sdl"
+  ],
+  "docs/how-to/generic-derivation.md": [
+    "generic-derivation-backend"
+  ],
+  "docs/how-to/circe-backend.md": [
+    "circe-json-backend-grackle-circe"
+  ],
+  "docs/how-to/serve-over-http.md": [
+    "http-integration-running-operations"
+  ],
+  "docs/concepts/architecture.md": [
+    "query-algebra-compiler-elaboration",
+    "cursor-query-interpreter",
+    "mappings-core-catalog"
+  ],
+  "docs/concepts/compiler-elaboration.md": [
+    "query-algebra-compiler-elaboration"
+  ],
+  "docs/concepts/mappings-cursors.md": [
+    "mappings-core-catalog",
+    "cursor-query-interpreter"
+  ],
+  "docs/concepts/query-interpreter.md": [
+    "cursor-query-interpreter"
+  ],
+  "docs/concepts/schema-model.md": [
+    "graphql-schema-sdl"
+  ],
+  "docs/concepts/nullability-lists.md": [
+    "graphql-schema-sdl"
+  ],
+  "docs/concepts/effects-batching.md": [
+    "effects-batching"
+  ],
+  "docs/concepts/composition.md": [
+    "composition-federation-of-mappings"
+  ],
+  "docs/concepts/introspection-fragments-variables.md": [
+    "introspection-directives-fragments-variables"
+  ],
+  "docs/reference/schema-sdl.md": [
+    "graphql-schema-sdl"
+  ],
+  "docs/reference/mapping-types.md": [
+    "mappings-core-catalog"
+  ],
+  "docs/reference/query-algebra.md": [
+    "query-algebra-compiler-elaboration"
+  ],
+  "docs/reference/predicates.md": [
+    "predicates-filtering-ordering-paging"
+  ],
+  "docs/reference/filtering-paging-nodes.md": [
+    "predicates-filtering-ordering-paging",
+    "query-algebra-compiler-elaboration"
+  ],
+  "docs/reference/cursor.md": [
+    "cursor-query-interpreter"
+  ],
+  "docs/reference/context-env.md": [
+    "query-algebra-compiler-elaboration",
+    "cursor-query-interpreter"
+  ],
+  "docs/reference/result-problem.md": [
+    "result-errors-problem"
+  ],
+  "docs/reference/elab-phases.md": [
+    "query-algebra-compiler-elaboration"
+  ],
+  "docs/reference/sql-mapping.md": [
+    "sql-mappings-joins-embedding-interfaces-unions-jsonb"
+  ],
+  "docs/reference/circe-mapping.md": [
+    "circe-json-backend-grackle-circe"
+  ],
+  "docs/reference/generic-derivation.md": [
+    "generic-derivation-backend"
+  ],
+  "docs/reference/effects.md": [
+    "effects-batching"
+  ],
+  "docs/reference/running-operations.md": [
+    "http-integration-running-operations",
+    "mappings-core-catalog"
+  ]
+}

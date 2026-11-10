@@ -1,0 +1,285 @@
+{
+  "subsystem": "Generic (derivation) backend",
+  "summary": "The Generic backend (module `grackle-generic`, package `grackle.generic`) lets you serve a GraphQL schema directly from ordinary Scala ADTs (case classes and sealed traits) without writing per-field mappings. Its core abstraction is the typeclass `CursorBuilder[T]`, which knows how to build a Grackle `Cursor` over a value of type `T`; instances for primitives, `Option`, `List`, Scala `Enumeration` values and any Circe-`Encoder` leaf are provided implicitly, and instances for product types (objects) and coproduct types (interfaces/unions) are derived semi-automatically via `semiauto.deriveObjectCursorBuilder` / `deriveInterfaceCursorBuilder` (shapeless on Scala 2, shapeless3 on Scala 3). A `GenericMapping[F]` wires these builders into the rest of Grackle by exposing `GenericField(fieldName, value)` field mappings and a `genericCursor` helper. There is no `@GraphQLField` or any other annotation in this codebase — derivation is purely structural (case-class field names must match GraphQL field names, and customisation is done explicitly with `renameField`/`transformFieldNames`/`transformField`).",
+  "keyConcepts": [
+    {
+      "name": "CursorBuilder[T] typeclass",
+      "explanation": "The central abstraction (modules/generic/src/main/scala/CursorBuilder.scala). A CursorBuilder[T] carries the GraphQL `tpe: Type` it produces and a `build(context, focus, parent, env): Result[Cursor]` method. Everything in the generic backend is about obtaining a CursorBuilder for your domain types. Summon one with `CursorBuilder[T]` (the apply on the companion)."
+    },
+    {
+      "name": "Implicit leaf/collection builders",
+      "explanation": "CursorBuilder.scala provides implicit instances for String, Int, Long, Float, Double, Boolean (PrimitiveCursor-backed leaves), `Option[T]` (nullable), `List[T]` (list), Scala `Enumeration#Value` (serialised via toString), and a fallback `leafCursorBuilder[T]` for any type with a Circe `Encoder[T]`. These are resolved automatically when deriving products/coproducts, so each field type must have a CursorBuilder in scope."
+    },
+    {
+      "name": "Semiauto product derivation (objects)",
+      "explanation": "`semiauto.deriveObjectCursorBuilder[T](tpe)` derives an ObjectCursorBuilder[T] for a case class, mapping each case-class field name to a sub-CursorBuilder resolved for that field's type. The GraphQL object type is supplied explicitly as `tpe` (a schema.ref). Field names are matched structurally to the case-class member names."
+    },
+    {
+      "name": "Semiauto coproduct derivation (interfaces/unions)",
+      "explanation": "`semiauto.deriveInterfaceCursorBuilder[T](tpe)` derives a CursorBuilder[T] for a sealed trait / sealed ADT whose subtypes each already have a CursorBuilder. At runtime it selects the concrete branch, builds with that branch's builder, and wraps it so the cursor reports the interface type but can `narrow` to the concrete subtype. Used for GraphQL `interface` (and union) types."
+    },
+    {
+      "name": "GenericField mapping",
+      "explanation": "`GenericField(fieldName, value)` (defined in GenericMappingLike) is a FieldMapping that attaches a Scala value plus its implicit CursorBuilder to a schema field — typically used on the root Query ObjectMapping to expose the in-memory data. `subtree` is true and it can be `hidden`. GenericMapping overrides `mkCursorForMappedField` to dispatch GenericField to its builder."
+    },
+    {
+      "name": "Field customisation combinators",
+      "explanation": "ObjectCursorBuilder[T] adds `renameField(from, to)`, `transformFieldNames(f)`, and `transformField[U](name)(f: T => Result[U])`. transformField is the key escape hatch: it replaces a derived field with a computed/effect-free resolution (e.g. resolving foreign-key id lists to nested objects), which is also how recursion between types is broken."
+    },
+    {
+      "name": "Recursion via lazy/by-name builders",
+      "explanation": "CursorBuilder implicit parameters are taken by-name (`implicit cb: => CursorBuilder[T]`), GenericField stores a `() => CursorBuilder[T]` thunk, and Impl's fieldMap is a lazy `=> FieldMap[T]`. This laziness lets mutually-recursive types (Programme <-> Production) and self-referential graphs define their builders as implicit vals without initialization-order deadlock."
+    },
+    {
+      "name": "genericCursor / DeferredCursor",
+      "explanation": "`genericCursor(path, env, t)` builds a Cursor for a value at an arbitrary path: at the root it builds eagerly; otherwise it returns a `DeferredCursor` that defers building until the surrounding context/parent is known. This is what you return from a RootEffect.computeCursor to plug a generic value into the effectful root."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "CursorBuilder[T]",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "trait CursorBuilder[T] {\n  def tpe: Type\n  def build(context: Context, focus: T, parent: Option[Cursor] = None, env: Env = Env.empty): Result[Cursor]\n  final def contramap[A](f: A => T): CursorBuilder[A] = CursorBuilder.contramap(f, this)\n}",
+      "purpose": "Core typeclass: knows the GraphQL Type and how to build a Cursor over a T. contramap adapts an existing builder to a wrapper type (e.g. CursorBuilder[String].contramap(_.value) for a single-field value class)."
+    },
+    {
+      "name": "CursorBuilder.apply",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "def apply[T](implicit cb: CursorBuilder[T]): CursorBuilder[T] = cb",
+      "purpose": "Summoner used in tests/examples as CursorBuilder[T] to obtain the in-scope instance."
+    },
+    {
+      "name": "deriveLeafCursorBuilder",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "def deriveLeafCursorBuilder[T](tpe0: Type)(implicit encoder: Encoder[T]): CursorBuilder[T]",
+      "purpose": "Builds a leaf CursorBuilder for a custom scalar type given a Circe Encoder and the GraphQL scalar Type (e.g. CursorBuilder.deriveLeafCursorBuilder[Genre](GenreType))."
+    },
+    {
+      "name": "leafCursorBuilder (implicit)",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "implicit def leafCursorBuilder[T](implicit encoder: Encoder[T]): CursorBuilder[T] = deriveLeafCursorBuilder(StringType)",
+      "purpose": "Implicit fallback: any T with a Circe Encoder becomes a leaf cursor reporting StringType. Drives the java.time / UUID scalar examples (their Encoders come from io.circe)."
+    },
+    {
+      "name": "deriveEnumerationCursorBuilder / enumerationCursorBuilder",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "def deriveEnumerationCursorBuilder[T <: Enumeration#Value](tpe0: Type): CursorBuilder[T]\nimplicit def enumerationCursorBuilder[T <: Enumeration#Value]: CursorBuilder[T] = deriveEnumerationCursorBuilder(StringType)",
+      "purpose": "Serialises a Scala Enumeration value as its .toString. Implicit version reports StringType."
+    },
+    {
+      "name": "optionCursorBuiler / listCursorBuiler (implicit)",
+      "file": "modules/generic/src/main/scala/CursorBuilder.scala",
+      "signature": "implicit def optionCursorBuiler[T](implicit elemBuilder: CursorBuilder[T]): CursorBuilder[Option[T]]\nimplicit def listCursorBuiler[T](implicit elemBuilder: CursorBuilder[T]): CursorBuilder[List[T]]",
+      "purpose": "Nullable and list wrappers (note the misspelled 'Builer' in both method names — they are public). Option => NullableType, List => ListType."
+    },
+    {
+      "name": "GenericMapping[F]",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "abstract class GenericMapping[F[_]](implicit val M: MonadThrow[F]) extends Mapping[F] with GenericMappingLike[F]",
+      "purpose": "Base class your mapping object/trait extends to use generic derivation. Requires a MonadThrow[F]."
+    },
+    {
+      "name": "GenericMappingLike[F].genericCursor",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "def genericCursor[T](path: Path, env: Env, t: T)(implicit cb: => CursorBuilder[T]): Result[Cursor]",
+      "purpose": "Builds a (possibly deferred) Cursor for a value t at path; used inside RootEffect.computeCursor to produce an effect-specific generic cursor."
+    },
+    {
+      "name": "GenericField (case class + factory)",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "case class GenericField[T](val fieldName: String, t: T, cb: () => CursorBuilder[T], hidden: Boolean)(implicit val pos: SourcePos) extends FieldMapping { def subtree: Boolean = true }\n\ndef GenericField[T](fieldName: String, t: T, hidden: Boolean = false)(implicit cb: => CursorBuilder[T], pos: SourcePos): GenericField[T]",
+      "purpose": "FieldMapping that exposes a Scala value (plus its by-name CursorBuilder) at a schema field. The factory is the normal entry point; cb is captured as a thunk for recursion safety."
+    },
+    {
+      "name": "semiauto.deriveObjectCursorBuilder",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "final def deriveObjectCursorBuilder[T](tpe: Type)(implicit mkBuilder: => MkObjectCursorBuilder[T]): ObjectCursorBuilder[T]",
+      "purpose": "Derives an object (GraphQL type) CursorBuilder for a case class T mapped to schema type tpe."
+    },
+    {
+      "name": "semiauto.deriveInterfaceCursorBuilder",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "final def deriveInterfaceCursorBuilder[T](tpe: Type)(implicit mkBuilder: => MkInterfaceCursorBuilder[T]): CursorBuilder[T]",
+      "purpose": "Derives an interface/union CursorBuilder for a sealed trait T mapped to schema type tpe; produced cursor narrows to concrete subtypes."
+    },
+    {
+      "name": "ObjectCursorBuilder[T]",
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "signature": "trait ObjectCursorBuilder[T] extends CursorBuilder[T] {\n  def renameField(from: String, to: String): ObjectCursorBuilder[T]\n  def transformFieldNames(f: String => String): ObjectCursorBuilder[T]\n  def transformField[U](fieldName: String)(f: T => Result[U])(implicit cb: => CursorBuilder[U]): ObjectCursorBuilder[T]\n}",
+      "purpose": "Customisation surface returned by deriveObjectCursorBuilder: rename fields and replace a derived field with a computed Result[U]."
+    },
+    {
+      "name": "MkObjectCursorBuilder / productCursorBuilder (Scala 3)",
+      "file": "modules/generic/src/main/scala-3/genericmapping3.scala",
+      "signature": "trait MkObjectCursorBuilder[T] { def apply(tpe: Type): ObjectCursorBuilder[T] }\nimplicit def productCursorBuilder[T <: Product](implicit inst: K0.ProductInstances[CursorBuilder, T], labelling: Labelling[T]): MkObjectCursorBuilder[T]",
+      "purpose": "Scala 3 (shapeless3) derivation of the object builder; uses Labelling for field names and ProductInstances to project each field."
+    },
+    {
+      "name": "MkInterfaceCursorBuilder / coproductCursorBuilder (Scala 3)",
+      "file": "modules/generic/src/main/scala-3/genericmapping3.scala",
+      "signature": "trait MkInterfaceCursorBuilder[T] { def apply(tpe: Type): CursorBuilder[T] }\nimplicit def coproductCursorBuilder[T](implicit inst: => K0.CoproductInstances[CursorBuilder, T]): MkInterfaceCursorBuilder[T]",
+      "purpose": "Scala 3 derivation of the interface/union builder via CoproductInstances.fold."
+    },
+    {
+      "name": "MkObjectCursorBuilder / productCursorBuilder (Scala 2)",
+      "file": "modules/generic/src/main/scala-2/genericmapping2.scala",
+      "signature": "implicit def productCursorBuilder[T <: Product, R <: HList, L <: HList](implicit gen: Generic.Aux[T, R], elems0: => PLiftAll[CursorBuilder, R], lgen: LabelledGeneric.Aux[T, L], keys0: Keys[L]): MkObjectCursorBuilder[T]",
+      "purpose": "Scala 2 (shapeless) equivalent: derives field map from LabelledGeneric record keys and per-field CursorBuilder instances."
+    },
+    {
+      "name": "MkInterfaceCursorBuilder / coproductCursorBuilder (Scala 2)",
+      "file": "modules/generic/src/main/scala-2/genericmapping2.scala",
+      "signature": "implicit def coproductCursorBuilder[T, R <: Coproduct](implicit gen: Generic.Aux[T, R], elems0: => CLiftAll[CursorBuilder, R]): MkInterfaceCursorBuilder[T]",
+      "purpose": "Scala 2 equivalent for sealed-trait coproducts; selects the branch index by walking the Coproduct."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Derive an object CursorBuilder for a case class",
+      "code": "import grackle.generic._\nimport StructMapping.semiauto._\n\ncase class Struct(n: Int, s: String)\nobject Struct {\n  implicit val cursorBuilder: CursorBuilder[Struct] =\n    deriveObjectCursorBuilder[Struct](StructType)\n}\n\n// StructType is a schema ref, e.g. schema.ref(\"Struct\")\n// Case-class member names (n, s) must match the GraphQL field names.",
+      "explanation": "Minimal object derivation, taken from EffectsSuite.scala. The case class fields n: Int and s: String resolve to the implicit Int/String CursorBuilders automatically. The GraphQL type is passed explicitly.",
+      "needsDb": false
+    },
+    {
+      "title": "Sealed trait as a GraphQL interface, with per-subtype objects",
+      "code": "import grackle.generic._\nimport StarWarsMapping.semiauto._\n\nsealed trait Character {\n  def id: String\n  def name: Option[String]\n  def appearsIn: Option[List[Episode.Value]]\n  def friends: Option[List[String]]\n}\nobject Character {\n  implicit val cursorBuilder: CursorBuilder[Character] =\n    deriveInterfaceCursorBuilder[Character](CharacterType)\n}\n\ncase class Human(\n  id: String, name: Option[String],\n  appearsIn: Option[List[Episode.Value]],\n  friends: Option[List[String]], homePlanet: Option[String]\n) extends Character\nobject Human {\n  implicit val cursorBuilder: CursorBuilder[Human] =\n    deriveObjectCursorBuilder[Human](HumanType).transformField(\"friends\")(resolveFriends)\n}",
+      "explanation": "From the demo (demo/src/main/scala/demo/starwars/StarWarsMapping.scala) and DerivationSuite.scala. The interface builder over the sealed trait dispatches to each subtype's object builder and supports `narrow` to Human/Droid for `... on Human` fragments. transformField replaces the derived `friends` (a List[String] of ids) with resolved nested Characters.",
+      "needsDb": false
+    },
+    {
+      "title": "transformField to resolve a foreign-key list to nested objects",
+      "code": "def resolveFriends(c: Character): Result[Option[List[Character]]] =\n  c.friends match {\n    case None => None.success\n    case Some(ids) =>\n      ids.traverse(id => characters.find(_.id == id).toResultOrError(s\"Bad id '$id'\"))\n         .map(_.some)\n  }\n\n// friends in the model is Option[List[String]] (ids), but the schema\n// declares friends: [Character!]; transformField bridges the gap:\nderiveObjectCursorBuilder[Human](HumanType).transformField(\"friends\")(resolveFriends)",
+      "explanation": "From DerivationSuite.scala / demo. The derived field has a different Scala shape than the GraphQL field; transformField[U] supplies a T => Result[U] and the implicit CursorBuilder[U] (here CursorBuilder[Option[List[Character]]]) is summoned to build the replacement cursor.",
+      "needsDb": false
+    },
+    {
+      "title": "Custom scalar leaf via Circe Encoder + deriveLeafCursorBuilder",
+      "code": "import io.circe.Encoder\nimport grackle.generic._\nimport MovieMapping.semiauto._\n\nsealed trait Genre\nobject Genre {\n  case object Drama extends Genre; case object Action extends Genre; case object Comedy extends Genre\n  implicit val genreEncoder: Encoder[Genre] =\n    Encoder[String].contramap { case Drama => \"DRAMA\"; case Action => \"ACTION\"; case Comedy => \"COMEDY\" }\n  implicit val cursorBuilder: CursorBuilder[Genre] =\n    CursorBuilder.deriveLeafCursorBuilder[Genre](GenreType)\n}\n\ncase class Movie(id: java.util.UUID, title: String, genre: Genre,\n                 releaseDate: java.time.LocalDate /* ... */)\nobject Movie {\n  implicit val cursorBuilder: CursorBuilder[Movie] = deriveObjectCursorBuilder[Movie](MovieType)\n}",
+      "explanation": "From ScalarsSuite.scala. java.time and UUID fields work through the implicit leafCursorBuilder (they have Circe Encoders); the Genre enum-like ADT is given an explicit leaf builder bound to the GraphQL scalar GenreType. Note these are LEAF scalars, not coproduct-derived objects.",
+      "needsDb": false
+    },
+    {
+      "title": "Wire generic builders into a Mapping with GenericField",
+      "code": "object StarWarsMapping extends GenericMapping[IO] {\n  val schema = schema\"\"\" type Query { hero(episode: Episode!): Character! ... } ... \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val CharacterType = schema.ref(\"Character\")\n  // ... HumanType, DroidType, EpisodeType\n\n  val typeMappings = List(\n    ObjectMapping(\n      tpe = QueryType,\n      fieldMappings = List(\n        GenericField(\"hero\", characters),\n        GenericField(\"character\", characters),\n        GenericField(\"human\", characters.collect { case h: Human => h }),\n        GenericField(\"droid\", characters.collect { case d: Droid => d })\n      )\n    )\n  )\n}",
+      "explanation": "From DerivationSuite.scala. GenericField(name, value) exposes the in-memory data at the root; the implicit CursorBuilder for the value's type (List[Character], List[Human], ...) is picked up automatically. A SelectElaborator then narrows the list with Unique/Filter/Eql.",
+      "needsDb": false
+    },
+    {
+      "title": "Effectful root cursor with genericCursor + RootEffect.computeCursor",
+      "code": "class GenericEffectMapping[F[_]: Sync](ref: SignallingRef[F, Int]) extends GenericMapping[F] {\n  import semiauto._\n  case class Struct(n: Int, s: String)\n  object Struct { implicit val cb: CursorBuilder[Struct] = deriveObjectCursorBuilder[Struct](StructType) }\n\n  val typeMappings = List(\n    ObjectMapping(\n      tpe = QueryType,\n      fieldMappings = List(\n        RootEffect.computeCursor(\"foo\")((p, e) =>\n          ref.update(_ + 1).as(genericCursor(p, e, Struct(42, \"hi\"))))\n      )\n    )\n  )\n}",
+      "explanation": "From EffectsSuite.scala. RootEffect.computeCursor runs an effect (here bumping a Ref) and yields a Result[Cursor] built by genericCursor(path, env, value), which defers cursor construction until the field context is known.",
+      "needsDb": false
+    },
+    {
+      "title": "Mutually recursive types via transformField",
+      "code": "case class Programme(id: String, productions: Option[List[String]])\nobject Programme {\n  implicit val cursorBuilder: CursorBuilder[Programme] =\n    deriveObjectCursorBuilder[Programme](ProgrammeType).transformField(\"productions\")(resolveProductions)\n  def resolveProductions(p: Programme): Result[Option[List[Production]]] = /* look up ids */ ???\n}\n\ncase class Production(id: String, programme: String)\nobject Production {\n  implicit val cursorBuilder: CursorBuilder[Production] =\n    deriveObjectCursorBuilder[Production](ProductionType).transformField(\"programme\")(resolveProgramme)\n  def resolveProgramme(p: Production): Result[Programme] = /* look up id */ ???\n}",
+      "explanation": "From RecursionSuite.scala. Programme references Production and vice-versa. Storing ids (String) in the model and resolving them in transformField breaks the cycle; the by-name implicit CursorBuilder parameters mean the two implicit vals can refer to each other without initialization errors.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "There is NO @GraphQLField (or any) annotation in the generic backend — derivation is purely structural. The case-class field NAME must exactly match the GraphQL field name; to differ, use renameField/transformFieldNames. The FOCUS hint about @GraphQLField does not apply to this codebase.",
+    "The GraphQL Type is always passed explicitly to deriveObjectCursorBuilder[T](tpe) / deriveInterfaceCursorBuilder[T](tpe) / deriveLeafCursorBuilder[T](tpe). Nothing is inferred from the Scala type name; a mismatch between case-class fields and the schema type's fields is only caught at query time (e.g. 'No field ...').",
+    "Implicit method names are misspelled: optionCursorBuiler and listCursorBuiler (missing the 'd'). If you ever reference them by name (rather than relying on implicit resolution) you must use the typo'd spelling.",
+    "Long maps to IntType and Double/Float both map to FloatType in the primitive builders (CursorBuilder.scala). There is no separate GraphQL type for Long/Double — they share Int/Float.",
+    "leafCursorBuilder is an implicit fallback for ANY type with a Circe Encoder and it reports StringType. This means a domain type with an Encoder in scope will silently be treated as a String leaf even where you intended an object — and it can shadow/compete with object derivation. Custom scalars rely on this (java.time, UUID, Genre).",
+    "CursorBuilder implicits are by-name (=> CursorBuilder[T]) and GenericField captures a () => CursorBuilder[T] thunk; Impl.fieldMap is lazy. This is deliberate for recursion. If you eagerly force a builder during construction of a mutually-recursive pair you can reintroduce initialization-order problems.",
+    "Recursion between object types is NOT automatic from the ADT shape — RecursionSuite models references as id Strings and resolves them with transformField. A naive directly-recursive case class (holding the related object) would require the related type's CursorBuilder to exist, which the by-name machinery allows, but the test/demo pattern is id-plus-resolver.",
+    "transformField's replacement type U must have its own CursorBuilder in scope (the implicit cb: => CursorBuilder[U] parameter). For resolveFriends returning Result[Option[List[Character]]] this means CursorBuilder[Option[List[Character]]] (via the Option/List/interface builders) must resolve.",
+    "The interface/union cursor wraps the concrete branch's cursor; narrow only succeeds when subtpe <:< interfaceTpe AND concreteTpe <:< subtpe (CursorImpl.narrowsTo). Querying a subtype-only field without a matching fragment, or narrowing to an unrelated type, yields an internalError 'cannot be narrowed'.",
+    "Scala 2 vs Scala 3 use different derivation engines (shapeless vs shapeless3) in separate source roots (scala-2/genericmapping2.scala, scala-3/genericmapping3.scala) but expose the identical public surface (MkObjectCursorBuilder/MkInterfaceCursorBuilder/ObjectCursorBuilder). Don't document shapeless-specific implicits (Generic.Aux, K0.ProductInstances) as public API — they are derivation internals.",
+    "GenericMapping requires an implicit MonadThrow[F]; the in-memory examples use IO. Fields resolved purely from data don't run effects, but RootEffect.computeCursor + genericCursor is the path for effectful roots."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "object StarWarsData (lines 35-156) and object StarWarsMapping (lines 158-233)",
+      "whatItShows": "Complete, compiling generic mapping: sealed-trait interface via deriveInterfaceCursorBuilder, two subtype objects via deriveObjectCursorBuilder, transformField('friends'), contramap value class (Planet), GenericField wiring, SelectElaborator. The canonical end-to-end example."
+    },
+    {
+      "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+      "region": "DerivationSuite tests (lines 235-353): 'product types have cursor builders', 'sealed ADTs have narrowable cursor builders', 'default cursor builders can be customised by mapping fields'",
+      "whatItShows": "Unit-level use of CursorBuilder[T].build / field / asNullable / asList / narrow — ideal for a reference page showing how a built Cursor is traversed and how narrow works on derived interfaces."
+    },
+    {
+      "file": "modules/generic/src/test/scala/RecursionSuite.scala",
+      "region": "object MutualRecursionData (lines 30-64) and object MutualRecursionMapping (lines 66-104)",
+      "whatItShows": "Mutually recursive Programme/Production via id fields + transformField resolvers; clean copy-paste for a 'recursion' how-to. The 6 query tests demonstrate arbitrarily deep recursion working."
+    },
+    {
+      "file": "modules/generic/src/test/scala/ScalarsSuite.scala",
+      "region": "object MovieData (lines 36-188), esp. Genre (41-66) and Movie (80-93)",
+      "whatItShows": "Custom scalar derivation: deriveLeafCursorBuilder[Genre](GenreType) with a Circe Encoder, plus java.time/UUID fields relying on the implicit Encoder-based leaf builder. Good 'custom scalars' reference."
+    },
+    {
+      "file": "modules/generic/src/test/scala/EffectsSuite.scala",
+      "region": "class GenericEffectMapping (lines 27-64) and EffectSuite test (66-97)",
+      "whatItShows": "genericCursor + RootEffect.computeCursor pattern for an effectful root that still serves a derived object — the only example combining effects with generic derivation."
+    },
+    {
+      "file": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala",
+      "region": "#model_types (121-173), #model_values (175-228), #root (76-84), #schema (32-66), #elaborator (87-109) snip tags already present",
+      "whatItShows": "Already-tagged demo source (mdoc-style #tags) of the full Star Wars generic mapping; designed for verbatim snipping into docs/tutorial."
+    },
+    {
+      "file": "modules/generic/src/main/scala/genericmapping.scala",
+      "region": "object semiauto (lines 63-69) and trait ObjectCursorBuilder (71-76)",
+      "whatItShows": "The exact public derivation entry points and customisation combinator signatures for the reference page."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Generic derivation: reference",
+      "diataxisType": "reference",
+      "outline": [
+        "Module/package: grackle-generic, grackle.generic",
+        "CursorBuilder[T] trait: tpe, build, contramap",
+        "Provided implicit builders: String/Int/Long/Float/Double/Boolean, Option, List, Enumeration#Value, Encoder-based leaf — with the GraphQL Type each maps to (note Long->Int, Double/Float->Float, leaf->String)",
+        "deriveLeafCursorBuilder / leafCursorBuilder / deriveEnumerationCursorBuilder",
+        "GenericMapping[F] (requires MonadThrow[F]) and GenericMappingLike",
+        "semiauto.deriveObjectCursorBuilder / deriveInterfaceCursorBuilder",
+        "ObjectCursorBuilder combinators: renameField, transformFieldNames, transformField",
+        "GenericField factory and case class (hidden, subtree)",
+        "genericCursor signature",
+        "Note on Scala 2 vs Scala 3 derivation backends (shapeless / shapeless3) — same public API"
+      ]
+    },
+    {
+      "title": "How case classes and sealed traits map to GraphQL objects, interfaces and unions",
+      "diataxisType": "explanation",
+      "outline": [
+        "Structural mapping: case-class member names == GraphQL field names (no annotations)",
+        "Product => object type; coproduct (sealed trait) => interface/union",
+        "How the interface cursor selects a branch and narrows to subtypes (... on Human)",
+        "Leaf vs object: when a type becomes a scalar leaf (Encoder in scope) vs a derived object",
+        "Why the GraphQL Type is passed explicitly",
+        "Recursion: by-name implicits / thunked GenericField / lazy fieldMap, and the id+resolver pattern",
+        "How GenericField/genericCursor plug derived cursors into the wider Mapping/Cursor model"
+      ]
+    },
+    {
+      "title": "Serve an in-memory ADT over GraphQL (Star Wars)",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Define the schema (SDL) and schema.ref types",
+        "Model the domain: Episode Enumeration, Character sealed trait, Human/Droid case classes",
+        "Derive builders: deriveInterfaceCursorBuilder for Character, deriveObjectCursorBuilder for subtypes",
+        "Customise: transformField('friends') to resolve id lists; contramap for a value class",
+        "Wire root with GenericField and a SelectElaborator (Unique/Filter/Eql)",
+        "Run a query with compileAndRun and inspect the result"
+      ]
+    },
+    {
+      "title": "How-to: custom scalars, renaming, transforming and recursive types",
+      "diataxisType": "how-to",
+      "outline": [
+        "Add a custom scalar with a Circe Encoder + deriveLeafCursorBuilder bound to the schema scalar",
+        "Use java.time/UUID fields via the implicit Encoder leaf builder",
+        "Rename a field whose Scala name differs from the schema (renameField / transformFieldNames)",
+        "Replace a derived field with a computed value (transformField) and the U => CursorBuilder requirement",
+        "Model mutually recursive / graph-shaped data with id fields and resolvers",
+        "Serve a derived value from an effectful root with RootEffect.computeCursor + genericCursor"
+      ]
+    }
+  ]
+}

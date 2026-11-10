@@ -1,0 +1,424 @@
+{
+  "subsystem": "Mappings core & catalog",
+  "summary": "A `Mapping[F]` is the central abstraction that ties a GraphQL `Schema` to an underlying data source. It holds three things: the `schema`, a `TypeMappings` catalog (a `Seq[TypeMapping]` indexed for lookup), and a `selectElaborator`. From these it builds a `QueryCompiler` and `QueryInterpreter`, and exposes top-level entry points `compileAndRun`/`compileAndRunSubscription`. The catalog distinguishes `TypeMapping`s (`ObjectMapping` for object/interface/union types; `LeafMapping[T]` for scalar/enum types) from `FieldMapping`s nested inside object mappings (`CursorField`, `ValueField`, `Delegate`, `EffectField`, `RootEffect`, `RootStream`, plus circe's `CirceField`/`CursorFieldJson`). Each `TypeMapping` is selected by a `MappingPredicate` (`TypeMatch`, `PathMatch`, `PrefixedTypeMatch`) so mappings can be context/path sensitive, and the whole catalog is validated against an unfolding of the schema before the compiler is built. Concrete subtypes — `ValueMapping` (in-memory Scala values), `ComposedMapping` (federating other mappings via `Delegate`/`combineAndRun`), `CirceMapping`, `GenericMapping`, `SqlMapping` — override `mkCursorForMappedField` to produce backend-specific `Cursor`s.",
+  "keyConcepts": [
+    {
+      "name": "Mapping[F]",
+      "explanation": "The abstract base (modules/core/src/main/scala/mapping.scala). A subclass supplies `implicit val M: MonadThrow[F]`, `val schema: Schema`, and `val typeMappings: TypeMappings` (and usually overrides `selectElaborator`). It derives `compiler`, `interpreter`, `componentElaborator`, `effectElaborator`, and offers `compileAndRun`/`compileAndRunSubscription`/`combineAndRun`. Everything else (TypeMapping/FieldMapping/Cursor catalog, validation failures) is nested inside this trait, so members like `ObjectMapping`, `CursorField`, `RootEffect`, `LeafCursor` are path-dependent on a `Mapping` instance."
+    },
+    {
+      "name": "TypeMappings catalog",
+      "explanation": "`final class TypeMappings` wraps a `Seq[TypeMapping]` plus mutable indices (typeIndex, predicatedTypeIndex, typeFieldIndex, predicatedTypeFieldIndex). It is the lookup engine: `typeMapping(context)`, `objectMapping(context)`, `fieldMapping(context|cursor, fieldName)`, `encoderForLeaf`. Built via `TypeMappings(...)` (checked) or `TypeMappings.unchecked(...)`. Built-in leaf mappings for String/Int/Float/Boolean/ID are always appended automatically. A `List[TypeMapping]` is converted to `TypeMappings` by the implicit `TypeMappings.fromList`, which is why test/demo code can write `val typeMappings = List(...)`."
+    },
+    {
+      "name": "TypeMapping vs FieldMapping",
+      "explanation": "`TypeMapping` (sealed) maps a whole GraphQL type and carries a `MappingPredicate` (its `tpe` comes from the predicate). The two concrete kinds are `ObjectMapping` (object/interface/union — holds `fieldMappings`) and `LeafMapping[T]` (scalar/enum — holds an `Encoder[T]`). `FieldMapping` (trait) maps a single field within an `ObjectMapping` and exposes `fieldName`, `hidden`, `subtree`, `pos`. The mapping-to-data wiring happens in `mkCursorForMappedField`, which pattern-matches on the `FieldMapping` subtype to build the right child `Cursor`."
+    },
+    {
+      "name": "MappingPredicate",
+      "explanation": "Decides when a `TypeMapping` applies, returning an `Option[Int]` priority (highest wins; ties are an `AmbiguousTypeMappings` error). `TypeMatch(tpe)` matches the type anywhere (priority 0). `PathMatch(path)` matches a type reached via a specific field path (preferred for context-sensitivity). `PrefixedTypeMatch(prefix, tpe)` is the legacy `PrefixedMapping` semantics. `ObjectMapping(tpe)(...)`, `ObjectMapping(path)(...)`, `LeafMapping[T](tpe)` etc. are convenience constructors that build the predicate for you."
+    },
+    {
+      "name": "Cursor production (mkCursorForMappedField)",
+      "explanation": "The core override point. `Mapping.mkCursorForMappedField` (protected) handles `EffectMapping` and `CursorField`; backend traits override it: `ValueMappingLike` handles `ValueField` by applying `f: T => Any` to the parent focus; `CirceMappingLike` handles `CirceField`/`CursorFieldJson`; `ComposedMapping` returns a `ComposedCursor`. `mkCursorForField` (final) resolves the `FieldMapping` from the catalog then delegates here."
+    },
+    {
+      "name": "Effect & root fields",
+      "explanation": "`EffectMapping` (subtree=true) covers fields that perform F-effects. `EffectField(name, handler, required, hidden)` defers an effect via an `EffectHandler[F]`. `RootEffect` runs an initial F-effect for a root query/mutation field, producing a `(Query, Cursor)`; `RootStream` is the streaming analogue used for subscriptions. Both have `apply`, `computeCursor`, `computeChild`, and (RootEffect only) `computeUnit` constructors; CirceMapping adds `computeJson`/`computeEncodable` via implicit syntax. `mapping.rootEffect`/`mapping.rootStream` look them up."
+    },
+    {
+      "name": "selectElaborator / compilerPhases",
+      "explanation": "`val selectElaborator: SelectElaborator = SelectElaborator.identity` is the per-mapping query-rewriting phase (typically overridden to translate field arguments into `Filter`/`Unique`/`Eql` predicates and to stash args in the `Env` via `Elab.env`). `compilerPhases = List(selectElaborator, componentElaborator, effectElaborator)`; `componentElaborator` is derived from `Delegate` field mappings and `effectElaborator` from `EffectField`s. The `compiler` lazy val validates the catalog (`unsafeValidateIfChecked`) then builds a `QueryCompiler`."
+    },
+    {
+      "name": "combineAndRun (federation)",
+      "explanation": "`combineAndRun(queries: List[(Query, Cursor)]): F[Result[List[ProtoJson]]]` is called by the interpreter (queryinterpreter.scala:784) at the end of a stage to evaluate deferred sub-queries grouped by the mapping responsible for them. The default runs each query one-shot and combines the ProtoJson results; mappings that can batch (e.g. SQL) override it to issue a single combined query. This is the mechanism behind `Delegate`/`ComposedMapping` cross-backend joins."
+    },
+    {
+      "name": "Mapping validation",
+      "explanation": "`validate(severity)` unfolds the schema from the root operation types and reports `ValidationFailure`s: `MissingTypeMapping`, `AmbiguousTypeMappings`, `MissingFieldMapping`, `DeclaredFieldMappingIsHidden`, `ObjectTypeExpected`, `LeafTypeExpected`, `ReferencedTypeDoesNotExist`, `UnusedTypeMapping`, `UnusedFieldMapping`. `unsafeValidate`/`validateInto` raise. A checked `TypeMappings` is validated automatically the first time `compiler` is forced."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Mapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "abstract class Mapping[F[_]] { implicit val M: MonadThrow[F]; val schema: Schema; val typeMappings: TypeMappings }",
+      "purpose": "Root abstraction tying a Schema to a data source; supplies query entry points and the TypeMapping/FieldMapping/Cursor catalog as nested members."
+    },
+    {
+      "name": "compileAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRun(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty)(implicit sc: Compiler[F, F]): F[Json]",
+      "purpose": "Compile and run a single query/mutation, yielding the JSON response. Errors if the result stream is not exactly one element."
+    },
+    {
+      "name": "compileAndRunSubscription",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRunSubscription(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty): Stream[F, Json]",
+      "purpose": "Compile and run a subscription, yielding a stream of JSON responses."
+    },
+    {
+      "name": "combineAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def combineAndRun(queries: List[(Query, Cursor)]): F[Result[List[ProtoJson]]]",
+      "purpose": "Evaluate a batch of (query, cursor) pairs in one stage; default runs each one-shot and combines results. Override to batch (e.g. SQL)."
+    },
+    {
+      "name": "defaultRootCursor",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def defaultRootCursor(query: Query, tpe: Type, parentCursor: Option[Cursor]): F[Result[(Query, Cursor)]]",
+      "purpose": "Yields the default RootCursor focused on the top-level operation type."
+    },
+    {
+      "name": "mkCursorForMappedField",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "protected def mkCursorForMappedField(parent: Cursor, fieldContext: Context, fm: FieldMapping): Result[Cursor]",
+      "purpose": "Primary override point: build the child Cursor for a resolved FieldMapping. Base handles EffectMapping and CursorField; backends extend it."
+    },
+    {
+      "name": "TypeMappings",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "final class TypeMappings private (val mappings: Seq[TypeMapping], ...) { def typeMapping(context: Context): Option[TypeMapping]; def objectMapping(context: Context): Option[ObjectMapping]; def fieldMapping(context: Context, fieldName: String): Option[FieldMapping]; def fieldMapping(parent: Cursor, fieldName: String): Result[Option[(Cursor, FieldMapping)]]; def validate(severity: Severity = Severity.Warning): List[ValidationFailure] }",
+      "purpose": "Indexed catalog of TypeMappings with lookup and validation. Constructed via the companion's apply/unchecked."
+    },
+    {
+      "name": "TypeMappings companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object TypeMappings { def apply(mappings: Seq[TypeMapping]): TypeMappings; def apply(mappings: TypeMapping*)(implicit dummy: DummyImplicit): TypeMappings; def unchecked(mappings: Seq[TypeMapping]): TypeMappings; def unchecked(mappings: TypeMapping*)(implicit dummy: DummyImplicit): TypeMappings; implicit def fromList(mappings: List[TypeMappingCompat]): TypeMappings; val empty: TypeMappings }",
+      "purpose": "Builders for the catalog. `apply` is validated, `unchecked` skips validation, `fromList` lets a plain List be used where TypeMappings is expected."
+    },
+    {
+      "name": "TypeMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "sealed trait TypeMapping extends TypeMappingCompat with Product with Serializable { def predicate: MappingPredicate; def pos: SourcePos; def tpe: NamedType = predicate.tpe; def showMappingType: String = productPrefix }",
+      "purpose": "Base of all type-level mappings; its GraphQL type comes from its predicate."
+    },
+    {
+      "name": "MappingPredicate",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait MappingPredicate { def tpe: NamedType; def apply(ctx: Context): Option[Int]; def continuationContext(ctx: Context): Option[Context] }",
+      "purpose": "Determines applicability + priority of a TypeMapping in a Context. Implementations: TypeMatch, PrefixedTypeMatch, PathMatch."
+    },
+    {
+      "name": "MappingPredicate.TypeMatch",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class TypeMatch(tpe: NamedType) extends MappingPredicate",
+      "purpose": "Matches a type in any context (priority 0)."
+    },
+    {
+      "name": "MappingPredicate.PathMatch",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class PathMatch(path: Path) extends MappingPredicate",
+      "purpose": "Matches a type reached via a specific field path; preferred for context-sensitive mappings."
+    },
+    {
+      "name": "MappingPredicate.PrefixedTypeMatch",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class PrefixedTypeMatch(prefix: List[String], tpe: NamedType) extends MappingPredicate",
+      "purpose": "Legacy PrefixedMapping semantics: matches a type with a given path prefix."
+    },
+    {
+      "name": "ObjectMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "abstract class ObjectMapping extends TypeMapping { def fieldMappings: Seq[FieldMapping]; def fieldMapping(fieldName: String): Option[FieldMapping] }",
+      "purpose": "Maps an object/interface/union type to its field mappings."
+    },
+    {
+      "name": "ObjectMapping companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object ObjectMapping { case class DefaultObjectMapping(predicate: MappingPredicate, fieldMappings: Seq[FieldMapping])(implicit val pos: SourcePos) extends ObjectMapping; def apply(predicate: MappingPredicate)(fieldMappings: FieldMapping*)(implicit pos: SourcePos): ObjectMapping; def apply(tpe: NamedType)(fieldMappings: FieldMapping*)(implicit pos: SourcePos): ObjectMapping; def apply(path: Path)(fieldMappings: FieldMapping*)(implicit pos: SourcePos): ObjectMapping; def apply(tpe: NamedType, fieldMappings: List[FieldMapping])(implicit pos: SourcePos): ObjectMapping }",
+      "purpose": "Constructors: curried (tpe)(fm*) form and the named-arg (tpe, List(fm)) form both appear in tests/demo."
+    },
+    {
+      "name": "FieldMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait FieldMapping extends Product with Serializable { def fieldName: String; def hidden: Boolean; def subtree: Boolean; def pos: SourcePos; def showMappingType: String = productPrefix }",
+      "purpose": "Base of all field-level mappings inside an ObjectMapping."
+    },
+    {
+      "name": "LeafMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait LeafMapping[T] extends TypeMapping { def encoder: Encoder[T]; def scalaTypeName: String; def pos: SourcePos }",
+      "purpose": "Maps a scalar or enum GraphQL type to a circe Encoder. (There is NO PrimitiveMapping type — LeafMapping is the leaf/primitive construct.)"
+    },
+    {
+      "name": "LeafMapping companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object LeafMapping { case class DefaultLeafMapping[T](predicate: MappingPredicate, encoder: Encoder[T], scalaTypeName: String)(implicit val pos: SourcePos) extends LeafMapping[T]; def apply[T: TypeName](predicate: MappingPredicate)(implicit encoder: Encoder[T], pos: SourcePos): LeafMapping[T]; def apply[T: TypeName](tpe: NamedType)(implicit encoder: Encoder[T], pos: SourcePos): LeafMapping[T]; def apply[T: TypeName](path: Path)(implicit encoder: Encoder[T], pos: SourcePos): LeafMapping[T]; def unapply[T](lm: LeafMapping[T]): Option[(Type, Encoder[T])] }",
+      "purpose": "Constructors require an implicit circe Encoder[T] (and TypeName[T])."
+    },
+    {
+      "name": "CursorField",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class CursorField[T](fieldName: String, f: Cursor => Result[T], encoder: Encoder[T], required: List[String], hidden: Boolean)(implicit val pos: SourcePos) extends FieldMapping { def subtree = false }",
+      "purpose": "Computes a leaf field value from the parent Cursor; `required` lists sibling fields/attributes the function depends on."
+    },
+    {
+      "name": "CursorField companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object CursorField { def apply[T](fieldName: String, f: Cursor => Result[T], required: List[String] = Nil, hidden: Boolean = false)(implicit encoder: Encoder[T], di: DummyImplicit): CursorField[T] }",
+      "purpose": "Public constructor — the encoder is implicit, so call sites pass only fieldName + f (+ optional required/hidden)."
+    },
+    {
+      "name": "Delegate",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class Delegate(fieldName: String, mapping: Mapping[F], join: (Query, Cursor) => Result[Query] = ComponentElaborator.TrivialJoin)(implicit val pos: SourcePos) extends FieldMapping { def hidden = false; def subtree = true }",
+      "purpose": "Delegates a field to another Mapping (cross-backend composition); `join` rewrites the sub-query against the parent cursor."
+    },
+    {
+      "name": "EffectField",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class EffectField(fieldName: String, handler: EffectHandler[F], required: List[String] = Nil, hidden: Boolean = false)(implicit val pos: SourcePos) extends EffectMapping",
+      "purpose": "A field whose value is produced by a deferred batched effect handler."
+    },
+    {
+      "name": "RootEffect",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootEffect private (fieldName: String, effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false; def toRootStream: RootStream }",
+      "purpose": "Performs an initial F-effect for a root query/mutation field. Constructed only via companion."
+    },
+    {
+      "name": "RootEffect companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object RootEffect { def apply(fieldName: String)(effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit pos: SourcePos, di: DummyImplicit): RootEffect; def computeUnit(fieldName: String)(effect: Env => F[Result[Unit]])(implicit pos: SourcePos): RootEffect; def computeCursor(fieldName: String)(effect: (Path, Env) => F[Result[Cursor]])(implicit pos: SourcePos): RootEffect; def computeChild(fieldName: String)(effect: (Query, Path, Env) => F[Result[Query]])(implicit pos: SourcePos): RootEffect }",
+      "purpose": "Convenience constructors for the common shapes: full, unit (query+cursor unchanged), cursor-only, child-query-only."
+    },
+    {
+      "name": "RootStream companion",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "object RootStream { def apply(fieldName: String)(effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]])(implicit pos: SourcePos, di: DummyImplicit): RootStream; def computeCursor(fieldName: String)(effect: (Path, Env) => Stream[F, Result[Cursor]])(implicit pos: SourcePos): RootStream; def computeChild(fieldName: String)(effect: (Query, Path, Env) => Stream[F, Result[Query]])(implicit pos: SourcePos): RootStream }",
+      "purpose": "Streaming analogue of RootEffect, used for subscriptions."
+    },
+    {
+      "name": "selectElaborator",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "val selectElaborator: SelectElaborator = SelectElaborator.identity",
+      "purpose": "Per-mapping query elaboration phase; override to translate field arguments into query algebra (Filter/Unique/Eql) and env bindings."
+    },
+    {
+      "name": "compilerPhases",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compilerPhases: List[QueryCompiler.Phase] = List(selectElaborator, componentElaborator, effectElaborator)",
+      "purpose": "Ordered compiler phases; override to insert custom phases."
+    },
+    {
+      "name": "ValueMapping / ValueMappingLike",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "abstract class ValueMapping[F[_]](implicit val M: MonadThrow[F]) extends Mapping[F] with ValueMappingLike[F]; trait ValueMappingLike[F[_]] extends Mapping[F] { def mkCursor(context: Context, focus: Any, parent: Option[Cursor], env: Env): Cursor; def valueCursor[T](path: Path, env: Env, t: T): Cursor }",
+      "purpose": "Maps in-memory Scala values. `valueCursor` builds a Cursor over a value t (used by RootEffect/RootStream effects)."
+    },
+    {
+      "name": "ValueField",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "case class ValueField[T](fieldName: String, f: T => Any, hidden: Boolean = false)(implicit val pos: SourcePos) extends ValueFieldMapping[T] { def subtree: Boolean = false; def unwrap: FieldMapping = this }",
+      "purpose": "Maps a field to a function from the parent value T to a child value. `ValueField.fromValue` provides a constant."
+    },
+    {
+      "name": "ValueField companion",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "object ValueField { def fromValue[T](fieldName: String, t: T, hidden: Boolean = false)(implicit pos: SourcePos): ValueField[Unit] }",
+      "purpose": "Constructs a ValueField yielding a constant value regardless of parent focus."
+    },
+    {
+      "name": "ValueObjectMapping",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "object ValueObjectMapping { case class DefaultValueObjectMapping(predicate: MappingPredicate, fieldMappings: Seq[FieldMapping], classTag: ClassTag[_])(implicit val pos: SourcePos) extends ObjectMapping; class Builder(predicate, pos){ def on[T](fieldMappings: ValueFieldMapping[T]*)(implicit classTag: ClassTag[T]): ObjectMapping }; def apply(predicate: MappingPredicate)(implicit pos: SourcePos): Builder; def apply(tpe: NamedType)(implicit pos: SourcePos): Builder; def apply(path: Path)(implicit pos: SourcePos): Builder; def apply[T](tpe: NamedType, fieldMappings: List[ValueFieldMapping[T]])(implicit classTag: ClassTag[T], pos: SourcePos): ObjectMapping }",
+      "purpose": "ObjectMapping whose narrowing for interfaces/unions is driven by a ClassTag (runtimeClass.isInstance(focus)). Two call styles: Builder `.on[T](...)` or the typed (tpe, List) form."
+    },
+    {
+      "name": "ValueCursor",
+      "file": "modules/core/src/main/scala/valuemapping.scala",
+      "signature": "case class ValueCursor(context: Context, focus: Any, parent: Option[Cursor], env: Env) extends Cursor",
+      "purpose": "Cursor over an arbitrary Scala value; narrowsTo uses the ValueObjectMapping ClassTag."
+    },
+    {
+      "name": "ComposedMapping",
+      "file": "modules/core/src/main/scala/composedmapping.scala",
+      "signature": "abstract class ComposedMapping[F[_]](implicit val M: MonadThrow[F]) extends Mapping[F] { case class ComposedCursor(context: Context, env: Env) extends AbstractCursor }",
+      "purpose": "Federating mapping: overrides mkCursorForMappedField to yield a ComposedCursor; fields are wired to sub-mappings via Delegate."
+    },
+    {
+      "name": "CursorFieldJson",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CursorFieldJson(fieldName: String, f: Cursor => Result[Json], required: List[String], hidden: Boolean = false)(implicit val pos: SourcePos) extends CirceFieldMapping",
+      "purpose": "Computes a Json subtree field from the parent Cursor (circe module). Used e.g. to decode JSON blobs stored in a column."
+    },
+    {
+      "name": "CirceField",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CirceField(fieldName: String, value: Json, hidden: Boolean = false)(implicit val pos: SourcePos) extends CirceFieldMapping",
+      "purpose": "Maps a field to a constant Json value (circe module)."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Minimal in-memory ValueMapping (object + leaf fields)",
+      "code": "import cats.effect.IO\nimport grackle._\nimport grackle.Predicate._\nimport grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\nimport grackle.syntax._\n\nobject CurrencyData {\n  case class Currency(code: String, exchangeRate: Double)\n  val currencies = List(Currency(\"EUR\", 1.12), Currency(\"GBP\", 1.25))\n}\n\nobject CurrencyMapping extends ValueMapping[IO] {\n  import CurrencyData._\n\n  val schema =\n    schema\"\"\"\n      type Query { fx(code: String): Currency }\n      type Currency { code: String!; exchangeRate: Float! }\n    \"\"\"\n\n  val QueryType = schema.ref(\"Query\")\n  val CurrencyType = schema.ref(\"Currency\")\n\n  val typeMappings =\n    List(\n      ValueObjectMapping[Unit](\n        tpe = QueryType,\n        fieldMappings = List(ValueField(\"fx\", _ => currencies))\n      ),\n      ValueObjectMapping[Currency](\n        tpe = CurrencyType,\n        fieldMappings = List(\n          ValueField(\"code\", _.code),\n          ValueField(\"exchangeRate\", _.exchangeRate)\n        )\n      )\n    )\n\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"fx\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CurrencyType / \"code\", Const(code)), child)))\n  }\n}\n\n// CurrencyMapping.compileAndRun(\"query { fx(code: \\\"GBP\\\") { code exchangeRate } }\")",
+      "explanation": "Verbatim shape of modules/core/src/test/scala/composed/ComposedData.scala (CurrencyMapping). Shows the canonical ValueMapping skeleton: schema literal, type refs, a `List(...)` of ValueObjectMappings (implicitly converted to TypeMappings via fromList), ValueField for each field, and a selectElaborator turning the `code` argument into a Filter/Unique. `typeMappings = List(...)` compiles because of the implicit TypeMappings.fromList.",
+      "needsDb": false
+    },
+    {
+      "title": "CursorField + arguments stashed in Env",
+      "code": "object EnvironmentMapping extends ValueMapping[IO] {\n  val schema = schema\"\"\"\n    type Query { nested: Nested! }\n    type Nested { sum(x: Int!, y: Int!): Int!; nested: Nested! }\n  \"\"\"\n  val QueryType  = schema.ref(\"Query\")\n  val NestedType = schema.ref(\"Nested\")\n\n  val typeMappings = List(\n    ObjectMapping(QueryType)(ValueField[Unit](\"nested\", _ => ())),\n    ObjectMapping(NestedType)(\n      CursorField(\"sum\", sum),\n      ValueField[Unit](\"nested\", _ => ())\n    )\n  )\n\n  def sum(c: Cursor): Result[Int] =\n    (for { x <- c.env[Int](\"x\"); y <- c.env[Int](\"y\") } yield x + y)\n      .toResult(\"Missing argument\")\n\n  override val selectElaborator = SelectElaborator {\n    case (NestedType, \"sum\", List(Binding(\"x\", IntValue(x)), Binding(\"y\", IntValue(y)))) =>\n      Elab.env(\"x\" -> x, \"y\" -> y)\n  }\n}",
+      "explanation": "From modules/core/src/test/scala/compiler/EnvironmentSuite.scala. Demonstrates CursorField computing a leaf from the Cursor, where the inputs are supplied by the selectElaborator via `Elab.env(...)` and read back with `c.env[T](name)`. Note CursorField's encoder is implicit (Int has one), so the call passes only name + function.",
+      "needsDb": false
+    },
+    {
+      "title": "Subscription + mutation with RootEffect / RootStream",
+      "code": "def mapping(ref: SignallingRef[IO, Int]): Mapping[IO] =\n  new ValueMapping[IO] {\n    val schema: Schema = schema\"\"\"\n      type Query        { get: Int! }\n      type Mutation     { put(n: Int): Int! }\n      type Subscription { watch: Int! }\n    \"\"\"\n    val QueryType        = schema.ref(\"Query\")\n    val MutationType     = schema.ref(\"Mutation\")\n    val SubscriptionType = schema.ref(\"Subscription\")\n\n    val typeMappings = List(\n      ObjectMapping(QueryType, List(\n        RootEffect.computeCursor(\"get\")((path, env) =>\n          ref.get.map(n => Result(valueCursor(path, env, n))))\n      )),\n      ObjectMapping(MutationType, List(\n        RootEffect.computeCursor(\"put\")((path, env) =>\n          env.get[Int](\"n\") match {\n            case None    => Result.failure(s\"`n: Int` not found in $env\").pure[IO]\n            case Some(n) => ref.set(n).map(_ => Result(valueCursor(path, env, n)))\n          })\n      )),\n      ObjectMapping(SubscriptionType, List(\n        RootStream.computeCursor(\"watch\")((path, env) =>\n          ref.discrete.map(n => Result(valueCursor(path, env, n))))\n      ))\n    )\n\n    override val selectElaborator: SelectElaborator = SelectElaborator {\n      case (MutationType, \"put\", List(Query.Binding(\"n\", Value.IntValue(n)))) =>\n        Elab.env(\"n\" -> n)\n    }\n  }\n// run subscription:  mapping(ref).compileAndRunSubscription(\"subscription { watch }\")",
+      "explanation": "Verbatim from modules/core/src/test/scala/subscription/SubscriptionSuite.scala. Shows RootEffect.computeCursor for query + mutation roots and RootStream.computeCursor for a subscription root, all building cursors with `valueCursor(path, env, value)`. Mutation arg `n` is threaded via Elab.env and read with env.get[Int].",
+      "needsDb": false
+    },
+    {
+      "title": "ComposedMapping federating two ValueMappings via Delegate + join",
+      "code": "object ComposedMapping extends ComposedMapping[IO] {\n  val schema = schema\"\"\"\n    type Query { country(code: String): Country; fx(code: String): Currency }\n    type Country  { code: String!; name: String!; currency: Currency! }\n    type Currency { code: String!; exchangeRate: Float! }\n  \"\"\"\n  val QueryType    = schema.ref(\"Query\")\n  val CountryType  = schema.ref(\"Country\")\n  val CurrencyType = schema.ref(\"Currency\")\n\n  val typeMappings = List(\n    ObjectMapping(tpe = QueryType, fieldMappings = List(\n      Delegate(\"country\", CountryMapping),\n      Delegate(\"fx\",      CurrencyMapping)\n    )),\n    ObjectMapping(tpe = CountryType, fieldMappings = List(\n      Delegate(\"currency\", CurrencyMapping, countryCurrencyJoin)\n    ))\n  )\n\n  def countryCurrencyJoin(q: Query, c: Cursor): Result[Query] =\n    (c.focus, q) match {\n      case (c: CountryData.Country, Select(\"currency\", _, child)) =>\n        Select(\"fx\",\n          Unique(Filter(Eql(CurrencyType / \"code\", Const(c.currencyCode)), child))).success\n      case _ => Result.internalError(\"Unexpected cursor focus type in countryCurrencyJoin\")\n    }\n}",
+      "explanation": "From modules/core/src/test/scala/composed/ComposedData.scala. Shows ComposedMapping wiring Query/Country fields to sub-mappings with Delegate, and a custom `join` that rewrites the `currency` selection into an `fx` query keyed on the parent Country's currencyCode. The interpreter invokes combineAndRun to evaluate the delegated subqueries.",
+      "needsDb": false
+    },
+    {
+      "title": "LeafMapping for custom scalar/enum types",
+      "code": "// scalar/enum types declared in the schema, mapped to Scala types via circe Encoders\nval typeMappings =\n  List(\n    ValueObjectMapping[Movie](\n      tpe = MovieType,\n      fieldMappings = List(\n        ValueField(\"id\", _.id),\n        ValueField(\"genre\", _.genre)\n        // ...\n      )\n    ),\n    LeafMapping[java.util.UUID](UUIDType),\n    LeafMapping[Genre](GenreType),\n    LeafMapping[java.time.LocalDate](DateType),\n    LeafMapping[java.time.Duration](IntervalType)\n  )",
+      "explanation": "From modules/core/src/test/scala/compiler/ScalarsSuite.scala. Each LeafMapping[T](tpe) needs an implicit circe Encoder[T] in scope (e.g. Genre.genreEncoder). LeafMapping is how custom scalars/enums are encoded — there is no separate PrimitiveMapping type. Built-in String/Int/Float/Boolean/ID leaf mappings are added automatically by TypeMappings.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "No `PrimitiveMapping` exists in the codebase. The leaf/primitive construct is `LeafMapping[T]` (modules/core/src/main/scala/mapping.scala). Built-in leaf mappings for String, Int, Float, Boolean and ID are appended automatically by `TypeMappings.mkMappings`, so you only declare LeafMappings for custom scalars/enums.",
+    "`CursorFieldJson` and `CirceField` are NOT in core — they live in the circe module (modules/circe/src/main/scala/circemapping.scala) on `CirceMappingLike`. They are only usable from a CirceMapping/CirceMappingLike subtype.",
+    "All catalog members are path-dependent types nested inside `Mapping[F]` (ObjectMapping, ValueField, CursorField, RootEffect, LeafCursor, the ValidationFailure case classes, etc.). You must reference them through a concrete Mapping instance/subclass; e.g. validation matches `case List(M.MissingTypeMapping(_))`.",
+    "`typeMappings = List(...)` only compiles because of the implicit `TypeMappings.fromList(List[TypeMappingCompat])`. If you need to skip validation, you must use `TypeMappings.unchecked(...)` explicitly — a plain List is always treated as checked.",
+    "A checked `TypeMappings` is validated lazily the first time the `compiler` val is forced (`unsafeValidateIfChecked`), which throws a `ValidationException`. Validation does NOT run at construction time, so a bad mapping can look fine until the first query is compiled.",
+    "Ambiguity is an error: if two TypeMappings match a context with equal (highest) predicate priority you get `AmbiguousTypeMappings`. `TypeMatch` has priority 0; `PathMatch`/`PrefixedTypeMatch` have higher priority proportional to path length, so a path-specific mapping wins over a bare type mapping.",
+    "Declared schema fields must have a non-hidden field mapping. `MissingFieldMapping` fires for a declared field with no mapping; `DeclaredFieldMappingIsHidden` fires if you mark a declared field's mapping `hidden = true`. Hidden is meant for synthetic/attribute fields used only as `required` dependencies of other fields.",
+    "`ValueObjectMapping` narrowing for interfaces/unions relies on a runtime `ClassTag` (`classTag.runtimeClass.isInstance(focus)`), so you MUST supply the correct concrete `[T]` type parameter — e.g. `ValueObjectMapping[Human](...)`. A wrong/erased type param breaks `narrowsTo`/`narrow`.",
+    "`compileAndRun` runs `compileAndRunSubscription` and expects exactly one element; a query against a Subscription-shaped root (or any stream producing 0 or >1 results) raises IllegalStateException. Use `compileAndRunSubscription` for subscriptions.",
+    "`RootEffect`/`RootStream` are private case classes — construct them only through the companion `apply`/`computeCursor`/`computeChild`/`computeUnit` factories, never with `new`. `computeChild` requires the root query to have an extractable child or it raises an internal error 'Root query has unexpected shape'.",
+    "`CursorField.f` and `ValueField.f` should declare every sibling field/attribute they read from the cursor in `required` (CursorField) so the interpreter knows to materialize those dependencies; ValueField operates only on the parent focus value, not on sibling cursors.",
+    "Overriding `combineAndRun` is the supported way to batch deferred subqueries (the default runs each query one-shot). SQL mappings override it; if you override it incorrectly the result list must stay aligned with the input query list or results will be mismatched.",
+    "`PrefixedMapping(tpe, mappings)` is a backwards-compat shim returning a `TypeMappingCompat.PrefixedMappingCompat`; it throws IllegalArgumentException unless all entries share the same `tpe`. Prefer `PathMatch` predicates for new code (the source comments say PathMatch should be preferred unless PrefixedTypeMatch semantics are strictly required)."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/composed/ComposedData.scala",
+      "region": "object CurrencyMapping extends ValueMapping[IO] (lines 42-81)",
+      "whatItShows": "Complete minimal ValueMapping: schema literal, type refs, ValueObjectMapping[Unit]/ValueObjectMapping[Currency] with ValueField, and a selectElaborator translating an argument into Filter/Unique/Eql."
+    },
+    {
+      "file": "modules/core/src/test/scala/composed/ComposedData.scala",
+      "region": "object ComposedMapping extends ComposedMapping[IO] + countryCurrencyJoin (lines 144-204)",
+      "whatItShows": "ComposedMapping federating two ValueMappings with Delegate and a custom join function that rewrites a sub-selection across backends."
+    },
+    {
+      "file": "modules/core/src/test/scala/effects/ValueEffectData.scala",
+      "region": "class ValueEffectMapping (lines 25-63)",
+      "whatItShows": "RootEffect.computeCursor on a Query root, building a ValueCursor with valueCursor(p,e,Struct(...)) while performing an fs2 SignallingRef side-effect."
+    },
+    {
+      "file": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala",
+      "region": "def mapping(ref) (lines 33-85)",
+      "whatItShows": "RootEffect (query+mutation) and RootStream (subscription) side by side on one ValueMapping, plus Mutation arg threaded via Elab.env. Also exercises compileAndRunSubscription."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/EnvironmentSuite.scala",
+      "region": "object EnvironmentMapping (lines 28-99)",
+      "whatItShows": "CursorField computing leaf values from the Cursor env, with selectElaborator stashing args via Elab.env and reading them via c.env[T]."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/ScalarsSuite.scala",
+      "region": "typeMappings + LeafMapping list (lines 224-255)",
+      "whatItShows": "LeafMapping[T](tpe) for several custom scalar/enum types (UUID, Genre, LocalDate, Duration, ...) alongside ValueObjectMapping fields; pairs with the Genre Encoder defined earlier in the file."
+    },
+    {
+      "file": "modules/core/src/test/scala/mapping/MappingValidatorSuite.scala",
+      "region": "ValidatorSuite tests (lines 25-120+)",
+      "whatItShows": "How TypeMappings.unchecked is used and how each ValidationFailure (MissingTypeMapping, AmbiguousTypeMappings, MissingFieldMapping) is triggered and matched — ideal for documenting validation."
+    },
+    {
+      "file": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala",
+      "region": "trait StarWarsMapping with #schema/#root/#elaborator tags (lines 30-110)",
+      "whatItShows": "A Mapping with already-present mdoc snippet tags (#schema, #root, #elaborator) showing schema, ObjectMapping(QueryType)(...) with GenericField, and a selectElaborator — ready-to-snip for docs."
+    },
+    {
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "region": "CirceField / CursorFieldJson / RootEffect.computeJson syntax (lines 38-96)",
+      "whatItShows": "The circe field-mapping catalog: CirceField (constant Json), CursorFieldJson (computed Json subtree), and the computeJson/computeEncodable RootEffect/RootStream syntax extensions."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlComposedWorldMapping.scala",
+      "region": "override def combineAndRun (lines 114-160)",
+      "whatItShows": "A real-world override of combineAndRun that groups and batches delegated subqueries instead of running them one-shot — the canonical example of customizing the federation stage."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Mapping reference: the catalog of TypeMappings and FieldMappings",
+      "diataxisType": "reference",
+      "outline": [
+        "Mapping[F]: required members (M, schema, typeMappings) and the derived compiler/interpreter",
+        "Entry points: compileAndRun, compileAndRunSubscription, combineAndRun, defaultRootCursor",
+        "TypeMapping catalog: ObjectMapping, LeafMapping[T] — signatures, constructors, when to use each",
+        "FieldMapping catalog: CursorField, ValueField, Delegate, EffectField, RootEffect, RootStream (+ circe CirceField/CursorFieldJson) — signatures and semantics",
+        "MappingPredicate: TypeMatch vs PathMatch vs PrefixedTypeMatch, priority rules",
+        "TypeMappings builders: apply (checked) vs unchecked vs fromList, built-in leaf mappings",
+        "Note: there is no PrimitiveMapping — LeafMapping is the primitive/leaf construct"
+      ]
+    },
+    {
+      "title": "How a Mapping ties a Schema to data (mkCursorForMappedField & Cursors)",
+      "diataxisType": "explanation",
+      "outline": [
+        "The two-layer model: TypeMapping selects the type, FieldMapping wires the field to data",
+        "mkCursorForField -> catalog lookup -> mkCursorForMappedField dispatch",
+        "How each backend overrides mkCursorForMappedField (Value, Composed, Circe)",
+        "ValueCursor / LeafCursor / ComposedCursor / CirceCursor and the focus model",
+        "selectElaborator and compilerPhases: turning arguments into query algebra and Env bindings",
+        "combineAndRun and the staged interpreter: how deferred subqueries are batched per mapping"
+      ]
+    },
+    {
+      "title": "Build an in-memory GraphQL service with ValueMapping",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Define the schema literal and type refs",
+        "Model your data as Scala case classes",
+        "ValueObjectMapping[T] + ValueField for each field; the ClassTag/narrowing requirement",
+        "LeafMapping for custom scalars/enums (supplying circe Encoders)",
+        "selectElaborator: translating arguments with Elab.transformChild / Eql / Filter / Unique / Elab.env",
+        "Run a query with compileAndRun"
+      ]
+    },
+    {
+      "title": "How-to: roots, effects and subscriptions (RootEffect / RootStream)",
+      "diataxisType": "how-to",
+      "outline": [
+        "Use RootEffect.computeCursor for an effectful query root",
+        "Use RootEffect on a Mutation field and thread arguments via Elab.env / env.get",
+        "Use RootStream.computeCursor for a Subscription root and run with compileAndRunSubscription",
+        "computeChild vs computeCursor vs computeUnit — choosing the right factory",
+        "Circe extras: RootEffect.computeJson / computeEncodable",
+        "Pitfall: compileAndRun expects exactly one result"
+      ]
+    },
+    {
+      "title": "How-to: compose multiple backends with ComposedMapping and Delegate",
+      "diataxisType": "how-to",
+      "outline": [
+        "Declare the federated schema and Delegate fields to sub-mappings",
+        "Write a join function to rewrite sub-selections (countryCurrencyJoin pattern)",
+        "How combineAndRun batches delegated subqueries; overriding it to batch (SQL example)",
+        "Validating the composed mapping"
+      ]
+    },
+    {
+      "title": "How-to: validate a Mapping and read the failures",
+      "diataxisType": "how-to",
+      "outline": [
+        "validate / unsafeValidate / validateInto and Severity",
+        "Checked vs unchecked TypeMappings and lazy validation on first compile",
+        "Catalog of ValidationFailures: MissingTypeMapping, AmbiguousTypeMappings, MissingFieldMapping, DeclaredFieldMappingIsHidden, ObjectTypeExpected, LeafTypeExpected, ReferencedTypeDoesNotExist, UnusedTypeMapping, UnusedFieldMapping",
+        "Worked examples from MappingValidatorSuite"
+      ]
+    }
+  ]
+}

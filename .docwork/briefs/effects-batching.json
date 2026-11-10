@@ -1,0 +1,284 @@
+{
+  "subsystem": "Effects & batching",
+  "summary": "Grackle's effects subsystem lets a Mapping run side-effecting computations (database queries, HTTP calls, ref updates, etc.) at two distinct points in query execution. RootEffect / RootStream attach an effect to a top-level Query/Mutation/Subscription field; they run once, up front, before the rest of the query is interpreted, and yield an effect-specific Query plus root Cursor. EffectField + EffectHandler attach an effect to a nested field deep inside the result tree; the EffectElaborator compiler phase wraps such fields in an Effect algebra node, and the interpreter defers every occurrence of that node into a ProtoJson.EffectJson placeholder. At the end of a stage the interpreter gathers all deferred EffectJson values and groups them by (mapping, handler), so a single EffectHandler.runEffects call receives a List[(Query, Cursor)] for every instance of that field across the whole result — this is the batching mechanism that turns a would-be N+1 into one call. The handler runs the effect once, produces one continuation Cursor per input pair, and the interpreter then evaluates each continuation child query against its cursor and scatters the JSON back into the original result tree. The circe and sql modules add convenience constructors (computeJson, computeEncodable) and reusable handlers built on Cursor/Json.",
+  "keyConcepts": [
+    {
+      "name": "RootEffect (root effects)",
+      "explanation": "A FieldMapping for a top-level field that runs an effect once, before the rest of the query is interpreted, returning F[Result[(Query, Cursor)]]. Used for mutation side effects and per-query setup. In runOneShot the interpreter partitions root queries into effectful vs pure; effectful ones run their RootEffect first, then runValue against the returned (query, cursor). Convenience constructors (computeUnit/computeCursor/computeChild) cover the common cases of computing just the cursor, just the child query, or neither."
+    },
+    {
+      "name": "RootStream (subscriptions)",
+      "explanation": "The streaming analogue of RootEffect: effect returns Stream[F, Result[(Query, Cursor)]], emitting one result per stream element. Only permitted in subscriptions — runOneShot raises an internal error 'RootStream only permitted in subscriptions' if one is reached for a query/mutation. RootEffect.toRootStream lifts a RootEffect into a single-element RootStream so mutations can be served through the subscription path."
+    },
+    {
+      "name": "EffectField + EffectHandler (nested/deferred effects)",
+      "explanation": "EffectField is a FieldMapping for a nested field; it names an EffectHandler[F] and an optional list of required sibling columns. EffectHandler has one method runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]]. The handler receives one (continuation-query, parent-cursor) pair per occurrence of the field in the result and must return one continuation Cursor per pair, in the same order."
+    },
+    {
+      "name": "Effect algebra node",
+      "explanation": "case class Effect[F[_]](handler: EffectHandler[F], child: Query). The EffectElaborator compiler phase rewrites Select(field, _, child) into Select(field, _, Effect(handler, Select(field,_,child))) wherever an EffectField mapping exists for that field. At interpretation, Select(_, _, Effect(handler, cont)) is turned into a deferred ProtoJson.effect(...) placeholder rather than being evaluated inline."
+    },
+    {
+      "name": "Batching via groupMap",
+      "explanation": "In completeAll, all deferred EffectJson placeholders are gathered across the entire ProtoJson tree and grouped with .groupMap(ej => (ej.mapping, ej.handler))(identity). Each group becomes exactly one handler.runEffects call carrying the full batch of (query, cursor) pairs. This is what collapses N sibling/nested effect fields into a single service call (avoiding N+1)."
+    },
+    {
+      "name": "Two-stage interpretation",
+      "explanation": "Interpretation proceeds in stages. A stage produces a ProtoJson that may contain deferred EffectJson nodes; completeAll runs the deferred effects (the next stage), evaluates their continuation child queries against the returned cursors, and scatters the resulting Json back into placeholders by identity. Each effect field therefore costs one extra stage, but all instances of it share that stage."
+    },
+    {
+      "name": "required columns",
+      "explanation": "EffectField(fieldName, handler, required, hidden). 'required' lists sibling fields/columns that must be fetched in the parent query so the handler can read them from the parent Cursor (e.g. List(\"code2\") so CurrencyQueryHandler can call parentCursor.fieldAs[String](\"code2\")). In SqlMapping this drives columnsForLeaf so the SQL SELECT includes those columns."
+    },
+    {
+      "name": "childContext / continuation query",
+      "explanation": "The Query passed to a handler is the continuation child (the selection set under the effect field). Query.childContext(parentCursor.context, query) derives the GraphQL Context for the result the handler must produce, and Query.extractChild is used by the interpreter to get the inner query that is finally run against each returned cursor."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Effect",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Effect[F[_]](handler: EffectHandler[F], child: Query) extends Query { def render = s\"<effect: ${child.render}>\" }",
+      "purpose": "Algebra node that embeds a possibly-batched deferred effect. Inserted by EffectElaborator around fields backed by an EffectField; the interpreter defers it into a ProtoJson.EffectJson placeholder."
+    },
+    {
+      "name": "EffectHandler",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "trait EffectHandler[F[_]] { def runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]] }",
+      "purpose": "User-implemented strategy that runs the batched effect for all occurrences of a nested effect field and returns one continuation Cursor per input pair (same order)."
+    },
+    {
+      "name": "EffectMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait EffectMapping extends FieldMapping { def subtree: Boolean = true }",
+      "purpose": "Common supertype of EffectField, RootEffect, and RootStream. subtree = true marks the field as owning its whole subtree."
+    },
+    {
+      "name": "EffectField",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class EffectField(fieldName: String, handler: EffectHandler[F], required: List[String] = Nil, hidden: Boolean = false)(implicit val pos: SourcePos) extends EffectMapping",
+      "purpose": "FieldMapping that attaches an EffectHandler to a nested field, optionally declaring sibling columns ('required') that must be present in the parent so the handler can read them from the parent Cursor."
+    },
+    {
+      "name": "RootEffect",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootEffect private (fieldName: String, effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false; def toRootStream: RootStream = RootStream(fieldName)((q, p, e) => Stream.eval(effect(q, p, e))) }",
+      "purpose": "FieldMapping for a top-level field that runs an effect once before interpretation, returning a possibly-modified Query and a root Cursor. Primary constructor is private; use the companion object factories."
+    },
+    {
+      "name": "RootEffect.apply",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def apply(fieldName: String)(effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit pos: SourcePos, di: DummyImplicit): RootEffect",
+      "purpose": "Full-control constructor: perform an initial effect and yield both an effect-specific query and its corresponding root cursor."
+    },
+    {
+      "name": "RootEffect.computeUnit",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeUnit(fieldName: String)(effect: Env => F[Result[Unit]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Run a pure side effect (e.g. a mutation write) leaving the query and default root cursor unchanged; effect results can only be propagated via the Env."
+    },
+    {
+      "name": "RootEffect.computeCursor",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeCursor(fieldName: String)(effect: (Path, Env) => F[Result[Cursor]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Run an effect and yield a custom root Cursor; the (elaborated) client query is used unchanged. Used by ValueMapping/CirceMapping examples (valueCursor/circeCursor)."
+    },
+    {
+      "name": "RootEffect.computeChild",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeChild(fieldName: String)(effect: (Query, Path, Env) => F[Result[Query]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Run an effect that computes a replacement child query, which is then executed against the mapping's default root cursor (e.g. to inject a Filter/Limit derived from the effect)."
+    },
+    {
+      "name": "RootStream",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootStream private (fieldName: String, effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false }",
+      "purpose": "Streaming root effect used for subscriptions; companion provides apply/computeCursor/computeChild mirroring RootEffect but returning Stream."
+    },
+    {
+      "name": "EffectElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class EffectElaborator[F[_]] private (effects: (Context, String) => Option[EffectHandler[F]]) extends Phase { override def transform(query: Query): Elab[Query] = ... case Some(handler) => Select(fieldName, resultName, Effect(handler, s.copy(child = ec))) ... }",
+      "purpose": "Compiler phase (added by Mapping.compilerPhases after selectElaborator and componentElaborator) that wraps each effect-mapped field's Select in an Effect node so the interpreter defers it."
+    },
+    {
+      "name": "ProtoJson.effect",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def effect[F[_]](mapping: Mapping[F], handler: EffectHandler[F], query: Query, cursor: Cursor): ProtoJson = wrap(EffectJson(mapping, Some(handler), query, cursor))",
+      "purpose": "Builds the deferred placeholder for one occurrence of a nested effect field; collected and batched in completeAll."
+    },
+    {
+      "name": "QueryInterpreter.completeAll",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def completeAll[F[_]: Monad](pjs: List[ProtoJson]): F[Result[List[Json]]]",
+      "purpose": "Gathers all deferred EffectJson across the ProtoJson tree, groups by (mapping, handler) into single runEffects batches, evaluates each continuation, and scatters results back by identity. This is where N+1 collapsing happens."
+    },
+    {
+      "name": "Mapping.combineAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def combineAndRun(queries: List[(Query, Cursor)]): F[Result[List[ProtoJson]]]",
+      "purpose": "Default batch runner for component (mapping-delegated) deferrals; overridable so e.g. SQL mappings can combine queries. EffectHandler-based deferrals bypass this and call handler.runEffects directly."
+    },
+    {
+      "name": "Query.childContext",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "def childContext(c: Context, query: Query): Result[Context]",
+      "purpose": "Derives the child GraphQL Context for the continuation query inside a handler (used by CurrencyQueryHandler to build CirceCursor children)."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Root effect computing a custom Cursor (ValueMapping)",
+      "code": "import cats.effect.Sync\nimport cats.implicits._\nimport fs2.concurrent.SignallingRef\nimport grackle._\nimport grackle.syntax._\n\nclass ValueEffectMapping[F[_]: Sync](ref: SignallingRef[F, Int]) extends ValueMapping[F] {\n  val schema =\n    schema\"\"\"\n      type Query { foo: Struct! }\n      type Struct { n: Int!  s: String! }\n    \"\"\"\n\n  val QueryType  = schema.ref(\"Query\")\n  val StructType = schema.ref(\"Struct\")\n\n  case class Struct(n: Int, s: String)\n\n  val typeMappings = List(\n    ObjectMapping(\n      tpe = QueryType,\n      fieldMappings = List(\n        // runs once, before the rest of the query, and yields a root Cursor\n        RootEffect.computeCursor(\"foo\")((p, e) =>\n          ref.update(_ + 1).as(Result(valueCursor(p, e, Struct(42, \"hi\")))))\n      )\n    ),\n    ValueObjectMapping[Struct](\n      tpe = StructType,\n      fieldMappings = List(\n        ValueField(\"n\", _.n),\n        ValueField(\"s\", _.s)\n      )\n    )\n  )\n}\n\n// query { foo { s n } }  ==>  { \"data\": { \"foo\": { \"s\": \"hi\", \"n\": 42 } } }\n// and the ref has been incremented exactly once.",
+      "explanation": "Verbatim from ValueEffectData.scala / ValueEffectSuite.scala. computeCursor runs the F-effect (here a SignallingRef update) once up front, then builds a root Cursor over an in-memory value via valueCursor(path, env, value). The suite asserts the ref ends at 1 even after running the query.",
+      "needsDb": false
+    },
+    {
+      "title": "Root effects: computeCursor / computeJson / computeEncodable (CirceMapping)",
+      "code": "import cats.effect.Sync\nimport cats.implicits._\nimport fs2.concurrent.SignallingRef\nimport io.circe.{Encoder, Json}\nimport grackle._\nimport grackle.circe.CirceMapping\nimport grackle.syntax._\n\nclass TestCirceEffectMapping[F[_]: Sync](ref: SignallingRef[F, Int]) extends CirceMapping[F] {\n  val schema =\n    schema\"\"\"\n      type Query { foo: Struct!  bar: Struct!  baz: Struct!  qux: Struct! }\n      type Struct { n: Int!  s: String! }\n    \"\"\"\n\n  val QueryType  = schema.ref(\"Query\")\n  val StructType = schema.ref(\"Struct\")\n\n  case class Struct(n: Int, s: String)\n  implicit val EncodeStruct: Encoder[Struct] = s =>\n    Json.obj(\"n\" -> Json.fromInt(s.n), \"s\" -> Json.fromString(s.s))\n\n  val typeMappings = List(\n    ObjectMapping(\n      tpe = QueryType,\n      fieldMappings = List(\n        // build the cursor yourself\n        RootEffect.computeCursor(\"foo\")((p, e) =>\n          ref.update(_ + 1).as(Result(circeCursor(p, e,\n            Json.obj(\"n\" -> Json.fromInt(42), \"s\" -> Json.fromString(\"hi\")))))),\n        // return raw Json, the mapping builds the cursor\n        RootEffect.computeJson(\"bar\")((_, _) =>\n          ref.update(_ + 1).as(Result(\n            Json.obj(\"n\" -> Json.fromInt(42), \"s\" -> Json.fromString(\"ho\"))))),\n        // return an Encodable value, the mapping encodes + builds the cursor\n        RootEffect.computeEncodable(\"baz\")((_, _) =>\n          ref.update(_ + 1).as(Result(Struct(44, \"hee\")))),\n        // cursor focussed on the root rather than the field\n        RootEffect.computeCursor(\"qux\")((p, e) =>\n          ref.update(_ + 1).as(Result(circeCursor(Path.from(p.rootTpe), e,\n            Json.obj(\"qux\" -> Json.obj(\"n\" -> Json.fromInt(42), \"s\" -> Json.fromString(\"hi\")))))))\n      )\n    )\n  )\n}\n\n// query { foo {s n} bar {s n} baz {s n} }  runs THREE root effects -> ref == 3",
+      "explanation": "Verbatim from CirceEffectData.scala / CirceEffectSuite.scala. computeJson and computeEncodable come from CirceMappingRootEffectSyntax (modules/circe). Each independent root field runs its own RootEffect, so the 'circe effect (multiple)' test asserts the counter ends at 3. Note 'qux' uses Path.from(p.rootTpe) to focus the cursor on the root and nests the field name inside the Json itself.",
+      "needsDb": false
+    },
+    {
+      "title": "Running a root effect from a test",
+      "code": "val prg: IO[(Json, Int)] =\n  for {\n    ref <- SignallingRef[IO, Int](0)\n    map  = new TestCirceEffectMapping(ref)\n    res <- map.compileAndRun(\"\"\"query { foo { s n } }\"\"\")\n    eff <- ref.get          // observe the side effect ran exactly once\n  } yield (res, eff)\n\nassertIO(prg, (expectedJson, 1))",
+      "explanation": "Verbatim pattern from ValueEffectSuite/CirceEffectSuite. Mapping.compileAndRun(text) compiles and runs the query, returning F[Json]; the SignallingRef is the observable side-effect proving the RootEffect fired the expected number of times.",
+      "needsDb": false
+    },
+    {
+      "title": "Batched nested EffectHandler over a service (avoids N+1)",
+      "code": "// schema: Country.currencies: [Currency!]!  backed by an external CurrencyService\nObjectMapping(\n  tpe = CountryType,\n  fieldMappings = List(\n    SqlField(\"code\", country.code, key = true, hidden = true),\n    SqlField(\"name\", country.name),\n    // 'code2' must be SELECTed in the parent so the handler can read it\n    EffectField(\"currencies\", CurrencyQueryHandler, List(\"code2\"))\n  )\n)\n\nobject CurrencyQueryHandler extends EffectHandler[F] {\n  def runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]] = {\n    val countryCodes  = queries.map(_._2.fieldAs[String](\"code2\").toOption)\n    val distinctCodes = queries.flatMap(_._2.fieldAs[String](\"code2\").toList).distinct\n\n    val children0 = queries.traverse { case (query, parentCursor) =>\n      Query.childContext(parentCursor.context, query).map(ctx => (ctx, parentCursor))\n    }\n\n    def unpackResults(res: Json): List[Json] = /* split the single service result per country */ ???\n\n    (for {\n      children <- ResultT(children0.pure[F])\n      // ONE service call for the whole batch, no matter how many countries are in the result\n      res      <- ResultT(currencyService.get(distinctCodes).map(_.success))\n    } yield {\n      unpackResults(res).zip(children).map { case (res, (childContext, parentCursor)) =>\n        CirceCursor(childContext, res, Some(parentCursor), parentCursor.env)\n      }\n    }).value.widen\n  }\n}",
+      "explanation": "From SqlNestedEffectsMapping.scala. The interpreter collects every occurrence of Country.currencies in the result and passes them as one List to runEffects. The handler reads the required 'code2' column off each parent Cursor, makes a SINGLE currencyService.get(distinctCodes) call for the whole batch, then returns one CirceCursor per input pair. SqlNestedEffectsSuite asserts the service counter goes from 0 to 1 for a query returning multiple cities/countries — proof that batching prevents N+1.",
+      "needsDb": true
+    },
+    {
+      "title": "Doubly-nested effect handler that re-queries the same mapping (runGrouped)",
+      "code": "object CountryQueryHandler extends EffectHandler[F] {\n  val toCode = Map(\"BR\" -> \"BRA\", \"GB\" -> \"GBR\", \"NL\" -> \"NLD\")\n  def runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]] =\n    runGrouped(queries) {\n      case (Select(_, _, child), cursors, indices) =>\n        val codes = cursors.flatMap(_.fieldAs[Json](\"countryCode\").toOption.flatMap(_.asString)).map(toCode)\n        val combinedQuery = Select(\"country\", None, Filter(In(CountryType / \"code\", codes), child))\n        (for {\n          cursor  <- ResultT(sqlCursor(combinedQuery, Env.empty))         // one SQL round-trip\n          cursor0 <- ResultT(mkListCursor(cursor, \"country\", None).pure[F])\n          pcs     <- ResultT(partitionCursor(codes, cursor0).pure[F])     // split back per input\n        } yield pcs.zip(indices)).value.widen\n      case _ => Result.internalError(\"Continuation query has the wrong shape\").pure[F].widen\n    }\n\n  // groups identical continuation queries, runs op once per group, restores original order\n  def runGrouped(ts: List[(Query, Cursor)])(\n      op: (Query, List[Cursor], List[Int]) => F[Result[List[(Cursor, Int)]]]): F[Result[List[Cursor]]] = {\n    val groupedAndIndexed = ts.zipWithIndex.groupMap(_._1._1)(ti => (ti._1._2, ti._2)).toList\n    val groupedResults = groupedAndIndexed.map { case (q, cis) =>\n      val (cursors, indices) = cis.unzip; op(q, cursors, indices)\n    }\n    groupedResults.sequence.map(_.sequence.map(_.flatten.sortBy(_._2).map(_._1)))\n  }\n}",
+      "explanation": "From SqlNestedEffectsMapping.scala (Currency.country effect field). Shows a handler that batches by grouping identical continuation queries, issues one sqlCursor(combinedQuery, env) per group, partitions the resulting list cursor back to the input order via the captured indices, and uses preunique/field to reshape. This is the pattern for an effect field whose result is itself produced by the same SQL mapping. The doubly-composed-query tests in SqlNestedEffectsSuite exercise it.",
+      "needsDb": true
+    },
+    {
+      "title": "Wiring a DB-backed nested-effects mapping (Postgres/doobie)",
+      "code": "final class NestedEffectsSuite extends DoobiePgDatabaseSuite with SqlNestedEffectsSuite {\n  def mapping: IO[(CurrencyService[IO], Mapping[IO])] =\n    for {\n      currencyService0 <- CurrencyService[IO]\n    } yield {\n      val mapping =\n        new DoobiePgTestMapping(transactor) with SqlNestedEffectsMapping[IO] {\n          lazy val currencyService = currencyService0\n        }\n      (currencyService0, mapping)\n    }\n}",
+      "explanation": "From DoobiePgSuites.scala. Demonstrates how the SQL-backed SqlNestedEffectsMapping is combined with a concrete database backend and the external CurrencyService. The CurrencyService is constructed first (so the test can inspect its call counter) and injected via the abstract 'def currencyService'.",
+      "needsDb": true
+    }
+  ],
+  "gotchas": [
+    "EffectHandler.runEffects must return EXACTLY one Cursor per input (Query, Cursor) pair, in the SAME order. The interpreter does (conts, cs).parMapN and scatters by position; a mismatched length or order silently corrupts results. The SQL examples go to real effort (indices + sortBy(_._2)) to restore the original order after grouping.",
+    "Batching key is (mapping, handler) identity. In completeAll the grouping is .groupMap(ej => (ej.mapping, ej.handler)). To get a single batched call you must reuse the SAME handler object instance across all occurrences (e.g. `object CurrencyQueryHandler extends EffectHandler[F]`). Constructing a fresh handler per field or per row would split the batch and reintroduce N+1.",
+    "'required' columns are mandatory for nested handlers that read parent data. EffectField(\"currencies\", handler, List(\"code2\")) makes the parent SQL SELECT include code2; without it parentCursor.fieldAs[String](\"code2\") fails. In SqlMapping this is wired through columnsForLeaf (case Some(EffectField(_, _, required, _))).",
+    "RootStream is only valid in subscriptions. runOneShot checks hasRootStream and returns Result.internalError(\"RootStream only permitted in subscriptions\") for a normal query/mutation. Conversely, mutations served via the subscription path use RootEffect.toRootStream to lift a single-shot effect into a one-element stream.",
+    "Each distinct nested effect field costs an extra interpreter stage. The effect is deferred into a ProtoJson placeholder and only resolved in completeAll. Doubly-nested effects (Currency.country inside Country.currencies) therefore run in successive stages — correct, but be aware the handler's continuation query is itself interpreted as a fresh sub-run.",
+    "The Query handed to a handler is the CONTINUATION CHILD, not the original field select. Handlers must use Query.childContext(parentCursor.context, query) / Query.extractChild to derive the right context and inner query. The interpreter also calls Query.extractChild on each input and errors with \"Continuation query has the wrong shape\" if a handler returns a cursor whose query isn't a single Select-shaped child.",
+    "RootEffect.computeUnit and computeCursor leave the client query unchanged; the ONLY channel to pass effect results downstream is the Env attached to the returned Cursor (the constructors call qc.map(_.withEnv(env))). If you need to change what is queried, use computeChild (which substitutes the child query) or the full RootEffect.apply.",
+    "RootEffect's primary constructor is private — you must go through the companion factories (apply / computeUnit / computeCursor / computeChild), or the circe-specific computeJson / computeEncodable from CirceMappingRootEffectSyntax. The bare apply also needs a DummyImplicit to disambiguate its overloads.",
+    "Independent root fields each fire their own RootEffect. The 'circe effect (multiple)' test (foo+bar+baz) ends with the counter at 3, not 1 — root effects are NOT batched across sibling root fields; only nested EffectField occurrences are batched.",
+    "circeCursor/valueCursor focus matters: in the 'qux' example the cursor is built with Path.from(p.rootTpe) (root-focussed) and the field name is embedded in the Json, whereas 'foo' builds a field-focussed cursor with the raw struct Json. Choosing the wrong focus yields a shape mismatch against the schema."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/effects/ValueEffectData.scala",
+      "region": "class ValueEffectMapping (whole file, lines 25-63)",
+      "whatItShows": "Minimal compiling RootEffect.computeCursor on a ValueMapping; the simplest possible worked example of a root effect."
+    },
+    {
+      "file": "modules/core/src/test/scala/effects/ValueEffectSuite.scala",
+      "region": "tests 'value effect' and 'value effect, aliased' (lines 24-88)",
+      "whatItShows": "How to drive a root effect with compileAndRun and assert the side effect fired exactly once via a SignallingRef; includes aliasing."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceEffectData.scala",
+      "region": "class TestCirceEffectMapping (whole file, lines 27-113)",
+      "whatItShows": "All four RootEffect flavours side by side: computeCursor (field- and root-focussed), computeJson, computeEncodable on a CirceMapping."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceEffectSuite.scala",
+      "region": "test 'circe effect (multiple)' (lines 153-199)",
+      "whatItShows": "That independent root effects each run once (counter == 3), the key fact that root effects are not batched across sibling fields."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlNestedEffectsMapping.scala",
+      "region": "object CurrencyQueryHandler (lines 215-251) and CountryQueryHandler/runGrouped (lines 253-312)",
+      "whatItShows": "Two complete, compiling EffectHandler implementations: a service-call batcher and a same-mapping re-query batcher with grouping + order restoration. The canonical N+1-avoidance reference."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlNestedEffectsMapping.scala",
+      "region": "typeMappings, esp. EffectField(\"currencies\", CurrencyQueryHandler, List(\"code2\")) and EffectField(\"country\", CountryQueryHandler) (lines 154-213)",
+      "whatItShows": "How EffectField is declared in an ObjectMapping alongside SqlField/SqlObject, including the 'required' column list."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlNestedEffectsSuite.scala",
+      "region": "tests 'simple multiple nested query' (155-218) and 'simple query with mutation' (220-322)",
+      "whatItShows": "Assertions that prove batching: counter goes 0->1 across a multi-row query, and 0->1->2 across two runs. The ground-truth proof that the effect runs once per query, not once per row."
+    },
+    {
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "region": "CirceMappingRootEffectSyntax / CirceMappingRootStreamSyntax (lines 38-57)",
+      "whatItShows": "Definitions of the computeJson and computeEncodable convenience constructors layered on computeCursor — useful for the reference page."
+    },
+    {
+      "file": "modules/doobie-pg/src/test/scala/DoobiePgSuites.scala",
+      "region": "NestedEffectsSuite (lines 183-194)",
+      "whatItShows": "How a DB-backed nested-effects mapping is assembled from a backend mapping + external service for the how-to / integration page."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Effects and batching reference",
+      "diataxisType": "reference",
+      "outline": [
+        "The Effect algebra node: case class Effect[F[_]](handler, child)",
+        "EffectMapping trait and its three implementations (EffectField, RootEffect, RootStream)",
+        "RootEffect: primary type + all factories (apply, computeUnit, computeCursor, computeChild) with exact signatures",
+        "RootStream: type + factories (apply, computeCursor, computeChild) — subscriptions only",
+        "circe extensions: RootEffect.computeJson / computeEncodable (and RootStream equivalents)",
+        "EffectField(fieldName, handler, required, hidden) — field semantics and the role of 'required'",
+        "EffectHandler[F] { runEffects(queries: List[(Query,Cursor)]): F[Result[List[Cursor]]] } — contract and ordering guarantee",
+        "Supporting helpers: Query.childContext, Query.extractChild, Mapping.combineAndRun, sqlCursor",
+        "Where effects run: EffectElaborator phase and QueryInterpreter (runOneShot for roots, completeAll for nested)"
+      ]
+    },
+    {
+      "title": "How effects and batching work in Grackle",
+      "diataxisType": "explanation",
+      "outline": [
+        "Why deferred effects exist: separating side-effecting fields from pure tree-walking",
+        "Root effects vs nested effects: two attachment points and when each runs",
+        "Compilation: how EffectElaborator wraps a field's Select in an Effect node",
+        "Interpretation in stages: ProtoJson, EffectJson placeholders, and scatter/gather",
+        "Batching by (mapping, handler) in completeAll and why it eliminates N+1",
+        "The continuation query and cursor: what a handler receives and must return",
+        "Cost model: one extra stage per distinct effect field; doubly-nested effects",
+        "Relationship to SQL mappings and to subscriptions (RootStream)"
+      ]
+    },
+    {
+      "title": "Run a side effect with a RootEffect (mutations and setup)",
+      "diataxisType": "how-to",
+      "outline": [
+        "Pick the right factory: computeUnit (write only), computeCursor (custom data), computeChild (rewrite the query), apply (full control)",
+        "Wire a RootEffect into the Query/Mutation ObjectMapping",
+        "Pass effect results downstream via the returned Cursor's Env",
+        "circe shortcut: return Json with computeJson or a value with computeEncodable",
+        "Test it: compileAndRun + a SignallingRef to assert the effect fired",
+        "Gotcha: independent root fields each run their own effect (no cross-field batching)"
+      ]
+    },
+    {
+      "title": "Batch a nested effect field with an EffectHandler (avoid N+1)",
+      "diataxisType": "how-to",
+      "outline": [
+        "Declare an EffectField on the nested field and list 'required' parent columns",
+        "Implement EffectHandler.runEffects: read parent data from each Cursor",
+        "Collapse the batch: collect distinct keys, make ONE service/DB call",
+        "Build one continuation Cursor per input pair using Query.childContext + CirceCursor",
+        "Preserve order: the same handler-instance rule, plus index/sortBy when grouping",
+        "Re-querying the same mapping: the runGrouped + sqlCursor + partitionCursor pattern",
+        "Verify batching with a call counter (0 -> 1 across a multi-row query)",
+        "Wire it to a real database backend (doobie/skunk) and an injected service"
+      ]
+    }
+  ]
+}

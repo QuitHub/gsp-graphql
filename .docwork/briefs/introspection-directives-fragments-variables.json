@@ -1,0 +1,331 @@
+{
+  "subsystem": "Introspection, directives, fragments, variables",
+  "summary": "This subsystem covers everything that turns a GraphQL query document into Grackle's internal query algebra apart from the data-fetching mapping itself: GraphQL introspection (`__schema`, `__type`, `__typename`), the built-in `@skip`/`@include` directives, custom query directives, named and inline fragment expansion (with type-condition narrowing), operation variables, and input-value coercion (both literal arguments and JSON variable values). Almost all of it is handled automatically by fixed compiler phases (`IntrospectionElaborator`, `VariablesSkipAndFragmentElaborator`, `MergeFields`) that run before the user's own elaborators; the only things a user configures are (1) whether introspection is `Full`/`TypenameOnly`/`Disabled` per query, (2) declaring custom directives in their SDL plus writing a `Phase` to interpret them, and (3) custom `SelectElaborator.select` logic which receives elaborated arguments and directives. Introspection is itself implemented as a separate self-contained `ValueMapping` over a fixed meta-schema (`Introspection.schema`) that is run on demand when an `Introspect` node is reached. Input coercion (custom-scalar widening, ID-from-String/Int, enum validation, defaulting, `@oneOf` enforcement, unknown-field rejection) is performed centrally in `Value.checkValue` / `Value.checkVarValue`.",
+  "keyConcepts": [
+    {
+      "name": "IntrospectionLevel (Full / TypenameOnly / Disabled)",
+      "explanation": "A per-query knob passed to compile / compileAndRun controlling which introspection meta-fields are allowed. Full enables __schema, __type and __typename; TypenameOnly allows only __typename (and rejects __schema/__type with 'Introspection is disabled'); Disabled removes the IntrospectionElaborator phase entirely so __schema/__type fall through to normal field resolution and fail with 'No field \"__type\" for type Query', while __typename is rejected with 'Introspection is disabled'. Defined in QueryCompiler.IntrospectionLevel."
+    },
+    {
+      "name": "IntrospectionElaborator phase",
+      "explanation": "Compiler Phase (built automatically, prepended before the user's phases) that rewrites UntypedSelect nodes named __typename/__schema/__type into Introspect(schema, sel) nodes, subject to the IntrospectionLevel. IntrospectionElaborator(level) returns None when level is Disabled so the phase is omitted. It also re-roots fragment children against the introspection meta-schema so introspection fragments type-check."
+    },
+    {
+      "name": "Introspect query node + Introspection.interpreter",
+      "explanation": "At runtime an Introspect(schema, query) node is executed by a dedicated interpreter Introspection.interpreter(targetSchema) which is a ValueMapping over the fixed meta-schema (Introspection.schema). The target schema's types/directives are exposed as plain Scala values (Type, Field, DirectiveDef, etc.) via ValueFields. __typename is special-cased and answered without invoking the full introspection mapping."
+    },
+    {
+      "name": "VariablesSkipAndFragmentElaborator phase",
+      "explanation": "The single automatic phase that does four jobs in one pass: substitutes variable references into argument/directive values (Value.elaborateValue), evaluates @skip/@include and drops guarded subtrees (yielding Query.Empty), expands named fragment spreads and inline fragments into Group/Narrow nodes, and validates leaf vs structured subselection. It strips skip/include from the directive list before handing remaining directives to Directive.elaborateDirectives."
+    },
+    {
+      "name": "@skip / @include semantics",
+      "explanation": "Built-in DirectiveDefs (DirectiveDef.Skip, DirectiveDef.Include) allowed on FIELD, FRAGMENT_SPREAD and INLINE_FRAGMENT. isSkipped computes (skip && if) || (include && !if). The 'if' argument may be a literal BooleanValue or a Boolean variable; a missing/non-Boolean argument or duplicate skip/include on one node fails compilation. Skipped nodes become Query.Empty and disappear from the result; the directives themselves never reach the data mapping."
+    },
+    {
+      "name": "Fragment expansion and type narrowing",
+      "explanation": "Named fragments (...frag) and inline fragments (... on T / ...) are expanded at compile time. If the context type is already a subtype of the fragment's type condition the children are inlined directly; otherwise they are wrapped in a Narrow(ref, child). fragmentApplies implements the spec's 'fragment spread is possible' rule via schema.subtypes intersection. Fragment definition errors (undefined, unused, duplicate, cyclic, incompatible type condition) are detected before/at elaboration."
+    },
+    {
+      "name": "Variables: definition, typing, coercion",
+      "explanation": "compileVarDefs turns $name: T var defs into InputValue defs against the target schema; compileVars coerces the supplied JSON variable values with Value.checkVarValue. Undefined and (optionally) unused variables are reported by validateVariablesAndFragments. Variable references inside arguments/lists/objects are only resolved during the VariablesSkipAndFragmentElaborator phase via Value.elaborateValue."
+    },
+    {
+      "name": "Input value coercion (checkValue vs checkVarValue)",
+      "explanation": "Two parallel coercion routines resolve a value against an InputValue definition: checkValue for literal query values (Value -> Value) and checkVarValue for JSON variable values (Json -> Value). Both apply defaults for absent values, enforce nullability, validate enums (e.hasValue), widen Int/String to ID and primitives to custom scalars, recurse into lists and input objects, reject unknown object fields, and enforce @oneOf (exactly one non-null member)."
+    },
+    {
+      "name": "@oneOf input objects",
+      "explanation": "Input object types declared `input X @oneOf` are enforced during coercion: exactly one member field must be present and non-null. Violations (zero present, >1 present, present-but-null) produce specific errors. isOneOf is also surfaced via introspection on __Type.isOneOf, and the oneOf directive itself appears in __schema.directives."
+    },
+    {
+      "name": "Custom query directives",
+      "explanation": "A custom directive is declared in SDL (e.g. `directive @upperCase on FIELD`) so it is registered in schema.directives and passes Directive.validateDirectivesForQuery location/argument checks. Behaviour is supplied by writing a QueryCompiler.Phase whose transform matches UntypedSelect nodes carrying that directive. Built-in skip/include/deprecated/specifiedBy/oneOf are always added (DirectiveDef.builtIns); user directives merge on top."
+    },
+    {
+      "name": "Automatic vs configured",
+      "explanation": "Automatic: introspection elaboration & execution, __typename, @skip/@include, fragment expansion/validation, variable substitution & coercion, input coercion, @oneOf, deprecation filtering of introspection results, merge of duplicate fields. Configured by the user: introspectionLevel per query, custom directive SDL + interpreting Phase, custom SelectElaborator.select for field arguments, and whether unused vars/fragments are reported (reportUnused)."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "QueryCompiler.IntrospectionLevel",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "sealed trait IntrospectionLevel; object IntrospectionLevel { case object Full extends IntrospectionLevel; case object TypenameOnly extends IntrospectionLevel; case object Disabled extends IntrospectionLevel }",
+      "purpose": "Per-query control of which introspection meta-fields (__schema/__type/__typename) are permitted."
+    },
+    {
+      "name": "QueryCompiler#compile",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def compile(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty): Result[Operation]",
+      "purpose": "Top-level entry: parses a GraphQL document and runs all compiler phases; introspectionLevel and reportUnused are the user-facing knobs for this subsystem."
+    },
+    {
+      "name": "Mapping#compileAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRun(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty)(implicit sc: Compiler[F, F]): F[Json]",
+      "purpose": "Convenience method (used throughout the test suites) that compiles and runs a query to a single JSON response; surfaces the same introspectionLevel/untypedVars/reportUnused knobs."
+    },
+    {
+      "name": "IntrospectionElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class IntrospectionElaborator(level: IntrospectionLevel) extends Phase; object IntrospectionElaborator { def apply(level: IntrospectionLevel): Option[IntrospectionElaborator] }",
+      "purpose": "Phase that rewrites __typename/__schema/__type selects into Introspect nodes per the level, or is omitted entirely when Disabled (apply returns None)."
+    },
+    {
+      "name": "VariablesSkipAndFragmentElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "object VariablesSkipAndFragmentElaborator extends Phase { override def transform(query: Query): Elab[Query]; def fragmentApplies(schema: Schema, typeCond: NamedType, ctpe: NamedType): Boolean; def isSkipped(dirs: List[Directive]): Elab[Boolean]; def extractCond(value: Value): Elab[Boolean] }",
+      "purpose": "Single automatic phase handling variable substitution, @skip/@include, fragment expansion+narrowing, and subselection validation."
+    },
+    {
+      "name": "Introspection",
+      "file": "modules/core/src/main/scala/introspection.scala",
+      "signature": "object Introspection { val schema: Schema; def interpreter(targetSchema: Schema): QueryInterpreter[Either[Throwable, *]]; class IntrospectionMapping(targetSchema: Schema) extends ValueMapping[Either[Throwable, *]] }",
+      "purpose": "Self-contained meta-schema and ValueMapping that answers introspection queries about a target schema; run on demand for Introspect nodes."
+    },
+    {
+      "name": "Value",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "sealed trait Value; object Value { case class IntValue(value: Int); case class FloatValue(value: Double); case class StringValue(value: String); case class BooleanValue(value: Boolean); case class IDValue(value: String); case class EnumValue(name: String); case class ListValue(elems: List[Value]); case class ObjectValue(fields: List[(String, Value)]); case class VariableRef(name: String); case object NullValue; case object AbsentValue }",
+      "purpose": "The query-algebra value ADT for arguments, directive args and variable values. Note the distinction between NullValue (explicit null) and AbsentValue (argument/field omitted)."
+    },
+    {
+      "name": "Value.checkValue",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "def checkValue(iv: InputValue, value: Option[Value], location: String): Result[Value]",
+      "purpose": "Coerce a literal query value against its InputValue definition: defaulting, nullability, enum validation, ID/custom-scalar widening, list/object recursion, unknown-field and @oneOf enforcement."
+    },
+    {
+      "name": "Value.checkVarValue",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "def checkVarValue(iv: InputValue, value: Option[Json], location: String): Result[Value]",
+      "purpose": "Same coercion as checkValue but for incoming JSON variable values; converts Json into Value while validating against the schema type."
+    },
+    {
+      "name": "Value.elaborateValue",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "def elaborateValue(value: Value, vars: Vars): Result[Value]",
+      "purpose": "Replace VariableRef nodes (including inside lists/objects) with their bound values during elaboration; fails with \"Variable 'x' is undefined\" if unbound."
+    },
+    {
+      "name": "DirectiveDef",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class DirectiveDef(name: String, description: Option[String], args: List[InputValue], isRepeatable: Boolean, locations: List[DirectiveLocation]); object DirectiveDef { val Skip; val Include; val Deprecated; val SpecifiedBy; val OneOf; val builtIns: List[DirectiveDef] }",
+      "purpose": "Schema-level directive definition. builtIns (skip, include, deprecated, specifiedBy, oneOf) are always merged into every schema's directives."
+    },
+    {
+      "name": "Directive",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class Directive(name: String, args: List[Binding]); object Directive { def fromAst(d: Ast.Directive): Result[Directive]; def validateDirectivesForQuery(schema: Schema, op: UntypedOperation, frags: List[UntypedFragment], vars: Vars): Result[Unit]; def validateDirectives(schema: Schema, location: Ast.DirectiveLocation, directives: List[Directive], vars: Vars): List[Problem]; def elaborateDirectives(schema: Schema, directives: List[Directive], vars: Vars): Result[List[Directive]] }",
+      "purpose": "A directive usage in a query. validateDirectivesForQuery checks location/repetition/argument validity; elaborateDirectives resolves and type-checks directive arguments (used for surviving non-skip/include directives)."
+    },
+    {
+      "name": "SelectElaborator#select",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def select(ref: TypeRef, name: String, args: List[Binding], directives: List[Directive]): Elab[Unit]",
+      "purpose": "User hook called per field with already-coerced arguments and surviving directives; where user-defined per-field argument and directive logic lives."
+    },
+    {
+      "name": "QueryCompiler.Phase",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "trait Phase { def transformFragments: Elab[Unit] = Elab.unit; def transform(query: Query): Elab[Query] = ... }",
+      "purpose": "Base type for compiler phases; the unit of extension for custom directive interpretation. Override transform and match UntypedSelect nodes whose directives contain your directive name."
+    },
+    {
+      "name": "Ast.DirectiveLocation",
+      "file": "modules/core/src/main/scala/ast.scala",
+      "signature": "sealed trait DirectiveLocation; object DirectiveLocation { QUERY, MUTATION, SUBSCRIPTION, FIELD, FRAGMENT_DEFINITION, FRAGMENT_SPREAD, INLINE_FRAGMENT, VARIABLE_DEFINITION, SCHEMA, SCALAR, OBJECT, FIELD_DEFINITION, ARGUMENT_DEFINITION, INTERFACE, UNION, ENUM, ENUM_VALUE, INPUT_OBJECT, INPUT_FIELD_DEFINITION }",
+      "purpose": "The set of locations a directive may be declared/used at; used by validateDirectiveOccurrences to reject misplaced directives."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Run an introspection query (__type) against a mapping",
+      "code": "val query = \"\"\"\n  {\n    __type(name: \"User\") {\n      name\n      fields {\n        name\n        type { name }\n      }\n    }\n  }\n\"\"\"\n\nval res: IO[Json] = TestMapping.compileAndRun(query)\n// data.__type.name == \"User\", fields == [id, name, birthday]",
+      "explanation": "Introspection is on by default (introspectionLevel = Full). No mapping for the __ meta-types is needed: Grackle rewrites __type into an Introspect node and runs the built-in Introspection meta-mapping over the target schema. Verbatim from IntrospectionSuite 'simple type query'.",
+      "needsDb": false
+    },
+    {
+      "title": "Disable introspection (and the TypenameOnly middle ground)",
+      "code": "// Fully disabled: __type/__schema become unknown fields\nval res1 = TestMapping.compileAndRun(query, introspectionLevel = Disabled)\n// => { \"errors\": [ { \"message\": \"No field '__type' for type Query\" } ] }\n\n// TypenameOnly: __typename still works, __schema/__type rejected\nval typenameQuery = \"\"\"{ users { __typename renamed: __typename name } }\"\"\"\nval res2 = SmallMapping.compileAndRun(typenameQuery, introspectionLevel = TypenameOnly)\n// => data.users[0].__typename == \"User\"",
+      "explanation": "introspectionLevel is the only thing you configure to gate introspection. Disabled drops the IntrospectionElaborator phase so __type falls through to normal field resolution; TypenameOnly keeps __typename but rejects schema/type introspection. From IntrospectionSuite 'introspection disabled' and 'introspection disabled typename allowed'.",
+      "needsDb": false
+    },
+    {
+      "title": "@skip / @include with Boolean variables",
+      "code": "val query = \"\"\"\n  query ($yup: Boolean, $nope: Boolean) {\n    a: field @skip(if: $yup)    { subfieldA }\n    b: field @skip(if: $nope)   { subfieldB }\n    c: field @include(if: $yup) { subfieldA }\n    d: field @include(if: $nope){ subfieldB }\n  }\n\"\"\"\nval variables = json\"\"\"{ \"yup\": true, \"nope\": false }\"\"\"\n\nval compiled = SkipIncludeMapping.compiler.compile(query, untypedVars = Some(variables))\n// only the 'b' and 'c' selections survive; 'a' and 'd' are dropped (Query.Empty)",
+      "explanation": "@skip/@include are handled entirely automatically by VariablesSkipAndFragmentElaborator. Guarded subtrees that are skipped become Query.Empty and vanish from the compiled algebra; the directives never reach the data mapping. From SkipIncludeSuite 'skip/include field'. They also work on fragment spreads and inline fragments.",
+      "needsDb": false
+    },
+    {
+      "title": "Named fragment, inline fragment and type narrowing",
+      "code": "val query = \"\"\"\n  query FragmentTyping {\n    profiles {\n      id\n      __typename\n      ...userFragment\n      ... on Page { title }\n    }\n  }\n  fragment userFragment on User { name }\n\"\"\"\n// compiles to:\n//   Select(\"profiles\", Group(List(\n//     Select(\"id\"),\n//     Introspect(schema, Select(\"__typename\")),\n//     Narrow(User, Select(\"name\")),\n//     Narrow(Page, Select(\"title\")))))\nval compiled = FragmentMapping.compiler.compile(query)",
+      "explanation": "Fragment spreads and inline fragments are expanded at compile time. Because profiles is an interface (Profile), each fragment whose type-condition is a subtype is wrapped in Narrow(T, ...). A supertype fragment (... on Profile) inlines directly without a Narrow. __typename becomes an Introspect node. Adapted from FragmentSuite 'typed fragment query' / 'inline fragment query'.",
+      "needsDb": false
+    },
+    {
+      "title": "Variables: definition, JSON values, and coercion into input objects",
+      "code": "val query = \"\"\"\n  query doSearch($pattern: Pattern) {\n    search(pattern: $pattern) { name id }\n  }\n\"\"\"\nval variables = json\"\"\"{ \"pattern\": { \"name\": \"Foo\", \"age\": 23, \"id\": 123 } }\"\"\"\nval compiled = VariablesMapping.compiler.compile(query, untypedVars = Some(variables))\n// pattern binding == ObjectValue(List(\n//   \"name\" -> StringValue(\"Foo\"), \"age\" -> IntValue(23),\n//   \"id\"   -> IDValue(\"123\"),      // Int coerced to ID\n//   \"userType\" -> AbsentValue, \"date\" -> AbsentValue)) // omitted fields filled as AbsentValue",
+      "explanation": "JSON variable values are coerced by checkVarValue against the schema: 123 becomes an IDValue, and input-object fields not supplied become AbsentValue (not NullValue). Supplying an unknown field ('quux') fails with \"Unknown field(s) 'quux' in input object value of type Pattern in variable values\". From VariablesSuite 'object variable query'.",
+      "needsDb": false
+    },
+    {
+      "title": "Input value coercion: null vs absent vs defaults",
+      "code": "val query = \"\"\"\n  query {\n    objectField(arg: { foo: 23, bar: true, baz: \"quux\" }) { subfield }\n  }\n\"\"\"\n// input InObj { foo: Int! bar: Boolean! baz: String! defaulted: String! = \"quux\" nullable: String }\n// arg binding == ObjectValue(List(\n//   \"foo\" -> IntValue(23), \"bar\" -> BooleanValue(true), \"baz\" -> StringValue(\"quux\"),\n//   \"defaulted\" -> StringValue(\"quux\"), // default applied\n//   \"nullable\"  -> AbsentValue))        // nullable+omitted => AbsentValue\nval compiled = InputValuesMapping.compiler.compile(query, None)",
+      "explanation": "Coercion fills defaults for omitted fields with a defaultValue, and yields AbsentValue for omitted nullable fields (vs NullValue for an explicit `null`). Top-level field(arg: null) => NullValue, field with no arg => AbsentValue. From InputValuesSuite 'input object value' and 'null value'.",
+      "needsDb": false
+    },
+    {
+      "title": "@oneOf input object enforcement",
+      "code": "// SDL:  input OneOfInObj @oneOf { a: Int  b: Boolean  c: String }\nval ok = OneOfInputValuesMapping.compiler.compile(\n  \"\"\"{ oneOfField(arg: { a: 42 }) { subfield } }\"\"\", None)\n// ok: ObjectValue(List(\"a\" -> IntValue(42), \"b\" -> AbsentValue, \"c\" -> AbsentValue))\n\nval bad = OneOfInputValuesMapping.compiler.compile(\n  \"\"\"{ oneOfField(arg: { a: 42, b: true }) { subfield } }\"\"\", None)\n// Failure: \"Exactly one key must be specified for oneOf input object OneOfInObj\n//           in field 'oneOfField' of type 'Query', but found 'a', 'b'\"",
+      "explanation": "Declaring an input object with @oneOf makes coercion enforce exactly one present, non-null member. Zero members, more than one, or a present-but-null member all fail with specific messages. Works for both literal args and variable values. From InputValuesSuite / VariablesSuite oneOf tests.",
+      "needsDb": false
+    },
+    {
+      "title": "Custom query directive: declare in SDL + interpret with a Phase",
+      "code": "object QueryDirectivesMapping extends ValueMapping[IO] {\n  val schema = schema\"\"\"\n    type Query { user: User! }\n    type User { name: String! handle: String! age: Int! }\n    directive @upperCase on FIELD\n  \"\"\"\n  // ... typeMappings ...\n\n  object upperCaseElaborator extends Phase {\n    override def transform(query: Query): Elab[Query] = query match {\n      case UntypedSelect(nme, alias, _, directives, _)\n          if directives.exists(_.name == \"upperCase\") =>\n        for {\n          c  <- Elab.context\n          fc <- Elab.liftR(c.forField(nme, alias))\n          res <- if (fc.tpe =:= ScalarType.StringType)\n                   super.transform(query).map(TransformCursor(toUpperCase, _))\n                 else\n                   Elab.warning(\"'upperCase' directive may only be applied to fields of type String\") *>\n                     super.transform(query)\n        } yield res\n      case _ => super.transform(query)\n    }\n    def toUpperCase(c: Cursor): Result[Cursor] =\n      FieldTransformCursor[String](c, _.toUpperCase.success).success\n  }\n\n  override def compilerPhases: List[QueryCompiler.Phase] =\n    List(upperCaseElaborator, selectElaborator, componentElaborator, effectElaborator)\n}",
+      "explanation": "A custom directive must be (1) declared in the SDL so it is registered in schema.directives and passes Directive.validateDirectivesForQuery (location/arg checks), and (2) interpreted by a user-written Phase prepended to compilerPhases. Note the directive is still on the UntypedSelect here because this phase runs before VariablesSkipAndFragmentElaborator strips non-skip/include directives. Verbatim from QueryDirectivesSuite.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "AbsentValue vs NullValue are distinct: an omitted argument/input-object field coerces to AbsentValue, an explicit `null` coerces to NullValue. Mappings and elaborators must handle both. Visible in InputValuesSuite 'null value' (field => AbsentValue, field(arg: null) => NullValue) and in every object-coercion test where omitted fields appear as AbsentValue.",
+    "Disabled vs TypenameOnly produce different errors for the same query. With Disabled, __type/__schema are not rewritten and fail later with \"No field '__type' for type Query\"; __typename fails with \"Introspection is disabled\". With TypenameOnly, __schema/__type fail with \"Introspection is disabled\" but __typename still resolves. (compiler.scala IntrospectionElaborator.transform; IntrospectionSuite).",
+    "Introspection field-resolution is reversed: when introspection is Disabled the IntrospectionElaborator phase is entirely absent (IntrospectionElaborator.apply returns None), so meta-fields are treated as ordinary schema fields. Don't assume a uniform 'introspection disabled' error message.",
+    "@skip and @include are stripped before custom directive elaboration. VariablesSkipAndFragmentElaborator filters out skip/include from the directive list before calling Directive.elaborateDirectives, and skipped nodes become Query.Empty. A custom Phase that inspects directives must run before this phase (prepend it to compilerPhases) or the directives may already be gone — but skip/include themselves are never visible to user phases that run after it.",
+    "Custom directives MUST be declared in the SDL. An undeclared directive triggers \"Undefined directive 'x'\" and a directive used at a wrong location triggers \"Directive 'x' is not allowed on <LOCATION>\" via Directive.validateDirectivesForQuery, run before the phases. Declaring `directive @upperCase on FIELD` only validates placement; it does NOT give behaviour — you still need an interpreting Phase.",
+    "Custom directive validation failures are warnings, not hard failures in the test example: the upperCase-on-Int case uses Elab.warning, so the query still returns data alongside an error entry. Whether a directive misuse aborts the query depends on whether your Phase yields Elab.failure or Elab.warning.",
+    "The skip/include 'if' argument must be Boolean (literal or Boolean variable). A non-Boolean variable, a missing 'if', or duplicate skip/include on one node fail with messages like \"Argument of skip/include must be boolean\", \"Directive 'x' must have a single Boolean 'if' argument\", or \"skip/include directives must be unique\" (VariablesSkipAndFragmentElaborator.isSkipped/extractCond).",
+    "Variables are validated for being defined AND unused. An undefined variable fails (\"Variable 'x' is undefined\"); an unused declared variable fails (\"Variable 'x' is unused\") unless you pass reportUnused = false. Same dual check applies to fragments (\"Fragment 'x' is unused\" / \"is undefined\"). See VariablesSuite and FragmentSuite.",
+    "Fragment validation is strict and happens up front: undefined fragment, duplicate fragment name, fragment cycles (\"Fragment cycle starting from 'x'\"), and type-incompatible spreads are all rejected. A supertype fragment that selects a subtype-only field fails (\"No field 'name' for type Profile\") — you must narrow with `... on User` inside the supertype fragment. (FragmentSuite supertype tests.)",
+    "Custom scalars are widened permissively during coercion: any of Int/Float/String/Boolean (and EnumValue-as-String) literals are accepted for a non-built-in ScalarType without validation (Value.checkValue/checkVarValue `if !s.isBuiltIn` branches). Grackle does not type-check custom scalar contents at this stage — that is the mapping's responsibility.",
+    "ID coercion is automatic and lossy-looking: StringValue and IntValue are coerced to IDValue (Int via i.toString). So a query literal `id: 123` and variable `123` both become IDValue(\"123\"). Don't rely on receiving an IntValue for an ID-typed argument.",
+    "Unknown input-object fields are rejected but the error location string differs between paths: literal args say \"... for input object value of type X in field 'f' of type 'Query'\" (checkValue) while variable values say \"... in input object value of type X in variable values\" (checkVarValue). The wording is subtly different.",
+    "Introspection runs as a separate ValueMapping over Introspection.schema and is keyed by schema identity: SelectElaborator routes to elaborateIntrospection only when `s eq Introspection.schema`. The includeDeprecated args on fields/enumValues/inputFields/args default to false and are elaborated into Filter nodes (e.g. dropping deprecated fields) automatically — see SelectElaborator.elaborateIntrospection.",
+    "__typename is always permitted under Full and TypenameOnly and is special-cased in the interpreter (queryinterpreter.scala handles Introspect(_, Select(\"__typename\", _, Empty))). It works inside named and inline fragments and supports aliasing (renamed: __typename). Only Disabled blocks it."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/introspection/IntrospectionSuite.scala",
+      "region": "test \"standard introspection query\" (lines ~1143-1485) and TestMapping/SmallMapping/InputMapping objects (lines ~1824-2088)",
+      "whatItShows": "A full GraphQL IntrospectionQuery (the canonical client introspection document) with named fragments FullType/InputValue/TypeRef, plus complete runnable mappings and the stripStandardElements helper. Ideal verbatim snippet for an 'introspection' reference/how-to page."
+    },
+    {
+      "file": "modules/core/src/test/scala/introspection/IntrospectionSuite.scala",
+      "region": "tests \"introspection disabled\", \"introspection disabled typename allowed\", \"Introspection query with isOneOf\", \"Introspection query with specifiedByURL\" (lines ~1487-1821)",
+      "whatItShows": "Enabling/disabling introspection via introspectionLevel, the Disabled vs TypenameOnly behaviours, and isOneOf/specifiedByURL meta-fields. Directly demonstrates the user-configurable surface."
+    },
+    {
+      "file": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala",
+      "region": "object QueryDirectivesMapping including upperCaseElaborator and compilerPhases override (lines ~151-213), plus tests 1-3 (lines ~58-148)",
+      "whatItShows": "The complete, compiling pattern for a custom query directive: SDL declaration, a custom Phase matching UntypedSelect by directive name, Elab.warning vs success, TransformCursor/FieldTransformCursor, and prepending the phase in compilerPhases. The single best snip for a 'custom directives' how-to."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/SkipIncludeSuite.scala",
+      "region": "entire file (lines 25-277) — tests for field, fragment-spread, inline-fragment, and nested skip/include + SkipIncludeMapping",
+      "whatItShows": "@skip/@include applied at every legal location with Boolean variables, showing the resulting query-algebra (Group/Select/Empty). Compiles and runs; good for a skip/include reference page."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/FragmentSuite.scala",
+      "region": "tests for named, nested, typed, inline, union, supertype, and error fragments (lines 42-1313) + FragmentData/FragmentMapping (lines 1315-1422)",
+      "whatItShows": "Exhaustive fragment behaviour: expansion to Group, Narrow(T, ...) type narrowing, __typename via Introspect, and all fragment error cases (undefined, unused, duplicate, cycle, incompatible). The definitive fragments source."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/VariablesSuite.scala",
+      "region": "entire file (lines 27-764) including VariablesMapping SDL and PreserveArgsElaborator usage",
+      "whatItShows": "Variable definitions/usage across scalars, enums, lists, input objects, directive args, list-with-variable interpolation, undefined/unused detection, and oneOf-via-variables. Shows IDValue/AbsentValue coercion in expected algebra."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/InputValuesSuite.scala",
+      "region": "entire file (lines 26-294) including InputValuesMapping and OneOfInputValuesMapping SDL",
+      "whatItShows": "Literal input-value coercion: null vs absent, lists, input objects with defaults and nullable fields, unknown-field rejection, and all @oneOf validation cases. Pairs with checkValue in schema.scala."
+    },
+    {
+      "file": "modules/core/src/main/scala/introspection.scala",
+      "region": "object Introspection: the meta-schema string (lines 22-136) and IntrospectionMapping typeMappings (lines 194-322)",
+      "whatItShows": "The exact built-in introspection meta-schema and how each __ type field is computed from the target schema. Authoritative reference for what introspection exposes (including isOneOf, specifiedByURL, deprecation)."
+    },
+    {
+      "file": "modules/core/src/main/scala/schema.scala",
+      "region": "Value.checkValue (lines 1168-1243) and Value.checkVarValue (lines 1255-1312)",
+      "whatItShows": "The two coercion routines with all their cases (defaults, nullability, custom scalars, ID widening, enums, lists, input objects, oneOf). The single source of truth for input coercion semantics and error messages."
+    },
+    {
+      "file": "modules/core/src/main/scala/schema.scala",
+      "region": "DirectiveDef built-ins Skip/Include/Deprecated/SpecifiedBy/OneOf and builtIns (lines 1329-1422); Directive.validateDirectivesForQuery (lines 1506-1578)",
+      "whatItShows": "The definitions of all built-in directives (names, args, allowed locations) and the query-time directive validation logic — useful for a directives reference page."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Introspection",
+      "diataxisType": "explanation",
+      "outline": [
+        "What GraphQL introspection is and that Grackle implements it automatically over any schema (no user mapping needed)",
+        "The introspection meta-schema: __schema, __type, __typename, and the __ meta-types (link to Introspection.schema)",
+        "How it runs: __* selects become Introspect nodes (IntrospectionElaborator) and are executed by Introspection.interpreter as a separate ValueMapping",
+        "Supported meta-fields including isOneOf, specifiedByURL, and includeDeprecated filtering",
+        "Automatic vs configured summary for this area"
+      ]
+    },
+    {
+      "title": "Enabling and disabling introspection",
+      "diataxisType": "how-to",
+      "outline": [
+        "The introspectionLevel parameter on compile / compileAndRun (Full / TypenameOnly / Disabled)",
+        "How to disable introspection for production endpoints",
+        "Behavioural differences and exact error messages per level (the Disabled-falls-through gotcha)",
+        "Keeping __typename available with TypenameOnly",
+        "Snip: IntrospectionSuite 'introspection disabled' tests"
+      ]
+    },
+    {
+      "title": "@skip, @include and built-in directives",
+      "diataxisType": "reference",
+      "outline": [
+        "Built-in DirectiveDefs: skip, include, deprecated, specifiedBy, oneOf (names, args, locations) from DirectiveDef",
+        "@skip/@include semantics: (skip && if) || (include && !if); literal vs Boolean-variable 'if'",
+        "Where they may appear (FIELD, FRAGMENT_SPREAD, INLINE_FRAGMENT) and that skipped subtrees become Empty",
+        "Validation errors (non-Boolean if, missing if, duplicates)",
+        "Snip: SkipIncludeSuite"
+      ]
+    },
+    {
+      "title": "Writing a custom query directive",
+      "diataxisType": "how-to",
+      "outline": [
+        "Step 1: declare the directive in your SDL with the correct `on <LOCATION>` (required for validation)",
+        "Step 2: write a QueryCompiler.Phase that matches UntypedSelect nodes carrying the directive",
+        "Step 3: prepend the phase in compilerPhases (ordering relative to VariablesSkipAndFragmentElaborator)",
+        "Using Elab.context/forField, TransformCursor and FieldTransformCursor to alter results",
+        "Failing vs warning (Elab.failure vs Elab.warning)",
+        "Full worked example: the @upperCase directive (snip QueryDirectivesSuite)"
+      ]
+    },
+    {
+      "title": "Fragments: named, inline, and type narrowing",
+      "diataxisType": "explanation",
+      "outline": [
+        "Named fragment spreads and inline fragments are expanded at compile time by VariablesSkipAndFragmentElaborator",
+        "Type conditions and narrowing: when children inline directly vs wrap in Narrow(T, ...) (fragmentApplies rule)",
+        "Fragments on interfaces/unions and nested fragment spreads",
+        "Compile-time fragment errors: undefined, unused (reportUnused), duplicate, cycle, incompatible type condition / supertype field access",
+        "Snip: FragmentSuite"
+      ]
+    },
+    {
+      "title": "Variables and input value coercion",
+      "diataxisType": "reference",
+      "outline": [
+        "Declaring variables ($name: T) and passing JSON values via untypedVars",
+        "Coercion rules: defaults, nullability, AbsentValue vs NullValue, ID widening, custom-scalar widening, enum validation, list/object recursion (checkValue vs checkVarValue)",
+        "Unknown input-object field rejection and per-path error message wording",
+        "@oneOf input objects: exactly-one-non-null enforcement and error messages",
+        "Variable validation: undefined and unused (reportUnused) detection",
+        "Variables inside directive arguments and inside list/object literals",
+        "Snip: VariablesSuite and InputValuesSuite"
+      ]
+    }
+  ]
+}

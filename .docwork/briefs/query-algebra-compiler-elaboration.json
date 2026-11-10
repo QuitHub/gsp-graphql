@@ -1,0 +1,450 @@
+{
+  "subsystem": "Query algebra, compiler & elaboration",
+  "summary": "The Query algebra is a sealed `Query` ADT that represents a GraphQL operation as a tree of interpretable nodes (Select, Group, Unique, Filter, Limit, Offset, OrderBy, Count, Component, Effect, Environment, Narrow, TransformCursor, Empty, plus pre-elaboration `UntypedSelect`/`UntypedFragmentSpread`/`UntypedInlineFragment` precursors). A `QueryCompiler` turns a GraphQL query string into an executable `Operation` by parsing it (via `QueryParser`) into untyped algebra, validating variables/fragments/field-mergeability, then folding a sequence of `Phase`s over the tree. Each phase runs inside the `Elab` monad (`StateT[Result, ElabState, T]`), which threads the schema, the current `Context`, query variables, fragments, a local elaboration `Env`, accumulated attributes, and a pending child-transform through the traversal. The pivotal phase is `SelectElaborator`: a mapping supplies a `PartialFunction[(TypeRef, String, List[Binding]), Elab[Unit]]` that consumes field arguments and rewrites each `UntypedSelect` into a directly-interpretable `Select` wrapping `Filter`/`Unique`/`Limit`/`OrderBy`/`Count`/etc. Built-in phases (IntrospectionElaborator, VariablesSkipAndFragmentElaborator, MergeFields, ComponentElaborator, EffectElaborator, QuerySizeValidator) handle introspection, variable substitution + skip/include + fragment expansion, field merging, multi-mapping composition, effects, and size limits.",
+  "keyConcepts": [
+    {
+      "name": "Query ADT vs Untyped precursors",
+      "explanation": "`Query` is a sealed trait. After parsing, the tree consists of `UntypedSelect`/`UntypedFragmentSpread`/`UntypedInlineFragment` nodes (carrying raw `Binding` args and `Directive`s). Compiler phases progressively rewrite these into the interpretable algebra: `Select`, `Group`, `Unique`, `Filter`, `Limit`, `Offset`, `OrderBy`, `Count`, `Narrow`, `Component`, `Effect`, `Environment`, `TransformCursor`, and the terminal `Empty`. A node like `Filter`/`Unique`/`Limit` is what the interpreter actually evaluates; `UntypedSelect` is not directly interpretable."
+    },
+    {
+      "name": "Two-stage Select: UntypedSelect -> Select",
+      "explanation": "Parsing produces `UntypedSelect(name, alias, args, directives, child)`. `VariablesSkipAndFragmentElaborator` substitutes variables into the `Binding` values and drops skip/include-guarded subtrees but keeps it untyped. `SelectElaborator` then types/normalises the args against the schema field, eliminates them by running the mapping's `Elab[Unit]`, and emits `Select(name, alias, child')` — optionally wrapped in `Environment(env, ...)` when the elaborator bound env vars, and merged with extra attribute selects."
+    },
+    {
+      "name": "Elab monad",
+      "explanation": "`type Elab[T] = StateT[Result, ElabState, T]`. It threads `ElabState` (schema, current `Context`, vars, fragments, current query, localEnv, attributes, pending childTransform, and a parent for push/pop) through the traversal and accumulates GraphQL errors/warnings via `Result`. The `Elab` object exposes combinators: `Elab.context`, `Elab.schema`, `Elab.vars`, `Elab.transformChild`, `Elab.env(...)`, `Elab.addAttribute`, `Elab.failure`, `Elab.warning`, `Elab.push`/`Elab.pop`, `Elab.hasField`/`hasSibling`. Elaborators almost never touch `ElabState` directly — they compose these combinators."
+    },
+    {
+      "name": "transformChild: argument elimination",
+      "explanation": "A `SelectElaborator` case returns `Elab.transformChild(child => ...)`. The returned function is captured in `ElabState.childTransform` and applied to the *already-elaborated* child in `SelectElaborator.transform`. This is how field arguments are turned into algebra: `Elab.transformChild(child => Unique(Filter(Eql(CharacterType / \"id\", Const(id)), child)))` rewrites `character(id:...) { ... }` into a `Unique`/`Filter` over the selection set. Multiple `transformChild` calls compose via `andThen`."
+    },
+    {
+      "name": "Phase pipeline order",
+      "explanation": "`compileOperation` always prepends `IntrospectionElaborator(level)` (unless Disabled), then `VariablesSkipAndFragmentElaborator :: MergeFields :: phases`, where `phases` is the mapping's `compilerPhases` (default `List(selectElaborator, componentElaborator, effectElaborator)`). Each phase runs `phase.transformFragments *> phase.transform(acc)` folded left over the query. Order matters: variables/fragments are resolved and fields merged *before* the user's SelectElaborator sees a clean typed tree."
+    },
+    {
+      "name": "Env and Environment",
+      "explanation": "`Env` (in cursor.scala) is an immutable string-keyed, type-tagged bag (`EmptyEnv`/`NonEmptyEnv`). During elaboration `Elab.env(\"x\" -> v)` writes to the node's *local* env (`ElabState.localEnv`); if non-empty after elaborating a Select, it is materialised as an `Environment(env, select)` node so the value reaches the interpreter, where a `CursorField` reads it via `cursor.env[Int](\"x\")`. The whole compile can also be seeded with an external `env` (e.g. `Env(\"secure\" -> true)`) passed to `compile`/`compileAndRun`."
+    },
+    {
+      "name": "Context push/pop",
+      "explanation": "Elaboration walks into child selections by `Elab.push(childCtx, child)` (saving the parent state) and `Elab.pop` afterwards. `Context.forField(fieldName, alias)` computes the child's type context. `hasSibling` is implemented by inspecting the parent state's query. This is the mechanism that lets an elaborator know its position in the schema (`TypeRef`) and inspect neighbouring selections."
+    },
+    {
+      "name": "addAttribute (synthetic selects)",
+      "explanation": "`Elab.addAttribute(name, query)` records a synthetic field that is merged into the elaborated Select via `mergeQueries(e1 :: attrs.map { case (nme, child) => Select(nme, child) })`. Used to inject computed/hidden fields (e.g. a `Count` to compute `hasMore` for pagination) that the client never asked for but a `CursorField` needs."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Query",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "sealed trait Query { def ~(query: Query): Query; def render: String }",
+      "purpose": "Root of the query algebra. `~` groups two queries (merging adjacent Groups); `render` produces a debug string."
+    },
+    {
+      "name": "Query.Select",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Select(name: String, alias: Option[String], child: Query) extends Query { def resultName: String = alias.getOrElse(name) }",
+      "purpose": "Interpretable field selection. Companion has overloads: Select(name), Select(name, alias), Select(name, child)."
+    },
+    {
+      "name": "Query.UntypedSelect",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class UntypedSelect(name: String, alias: Option[String], args: List[Binding], directives: List[Directive], child: Query) extends Query",
+      "purpose": "Pre-elaboration field selection carrying raw arguments and directives. Rewritten to `Select` by SelectElaborator."
+    },
+    {
+      "name": "Query.Group",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Group(queries: List[Query]) extends Query",
+      "purpose": "A list of sibling selections at the same level."
+    },
+    {
+      "name": "Query.Unique",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Unique(child: Query) extends Query",
+      "purpose": "Asserts the child produces a single-element list and yields that element (e.g. `character(id:...)`)."
+    },
+    {
+      "name": "Query.Filter",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Filter(pred: Predicate, child: Query) extends Query",
+      "purpose": "Retains only child elements satisfying `pred`."
+    },
+    {
+      "name": "Query.Limit / Offset",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Limit(num: Int, child: Query) extends Query  /  case class Offset(num: Int, child: Query) extends Query",
+      "purpose": "Pagination: take first `num` / drop first `num` elements of a list-producing child."
+    },
+    {
+      "name": "Query.OrderBy / OrderSelections / OrderSelection",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class OrderBy(selections: OrderSelections, child: Query) extends Query;  case class OrderSelections(selections: List[OrderSelection[_]]);  case class OrderSelection[T: Order](term: Term[T], ascending: Boolean = true, nullsLast: Boolean = true)",
+      "purpose": "Orders a list-producing child by one or more `Term`s, with ascending/nullsLast controls."
+    },
+    {
+      "name": "Query.Count",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Count(child: Query) extends Query",
+      "purpose": "Computes the number of top-level elements of `child` (used for computed counts / hasMore)."
+    },
+    {
+      "name": "Query.Component",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Component[F[_]](mapping: Mapping[F], join: (Query, Cursor) => Result[Query], child: Query) extends Query",
+      "purpose": "Marks a boundary where a different mapping/interpreter takes over; `join` computes the continuation query from the current cursor."
+    },
+    {
+      "name": "Query.Effect / EffectHandler",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Effect[F[_]](handler: EffectHandler[F], child: Query) extends Query;  trait EffectHandler[F[_]] { def runEffects(queries: List[(Query, Cursor)]): F[Result[List[Cursor]]] }",
+      "purpose": "Embeds (possibly batched) effects to be run by the interpreter in a later phase."
+    },
+    {
+      "name": "Query.Environment",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Environment(env: Env, child: Query) extends Query",
+      "purpose": "Adds `env` bindings to the runtime environment for `child`; materialised from `Elab.env` during elaboration."
+    },
+    {
+      "name": "Query.Narrow",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Narrow(subtpe: TypeRef, child: Query) extends Query",
+      "purpose": "Yields `child` only when the focus is of type `subtpe`, else Empty. Produced when expanding fragments with a type condition."
+    },
+    {
+      "name": "Query.TransformCursor",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class TransformCursor(f: Cursor => Result[Cursor], child: Query) extends Query",
+      "purpose": "Computes a continuation cursor from the current cursor before evaluating `child`."
+    },
+    {
+      "name": "Query.Introspect",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Introspect(schema: Schema, child: Query) extends Query",
+      "purpose": "Evaluates an introspection subquery relative to `schema`. Inserted by IntrospectionElaborator around `__schema`/`__type`/`__typename`."
+    },
+    {
+      "name": "Query.Empty",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case object Empty extends Query",
+      "purpose": "The terminal query / empty selection set (leaf fields have child == Empty)."
+    },
+    {
+      "name": "Query.Binding",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Binding(name: String, value: Value)",
+      "purpose": "A field/directive argument: a name plus a `Value`. The unit the SelectElaborator pattern-matches on."
+    },
+    {
+      "name": "Query.UntypedFragment / UntypedVarDef",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class UntypedFragment(name: String, tpnme: String, directives: List[Directive], child: Query);  case class UntypedVarDef(name: String, tpe: Ast.Type, default: Option[Value], directives: List[Directive])",
+      "purpose": "Pre-compilation fragment and variable definitions produced by the parser."
+    },
+    {
+      "name": "Query type aliases",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "type UntypedVarDefs = List[UntypedVarDef];  type VarDefs = List[InputValue];  type Vars = Map[String, (Type, Value)]",
+      "purpose": "Variable-definition representations across compilation stages; `Vars` is the resolved (type,value) map available via `Elab.vars`."
+    },
+    {
+      "name": "Query helper functions",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "def ungroup(query: Query): List[Query];  def mergeQueries(qs: List[Query]): Query;  def mergeUntypedQueries(qs: List[Query]): Query;  def children(q: Query): List[Query];  def extractChild(query: Query): Option[Query];  def substChild(query: Query, newChild: Query): Option[Query];  def hasField(query: Query, fieldName: String): Boolean;  def fieldAlias(query: Query, fieldName: String): Option[String];  def mapFields(query: Query)(f: Query => Query): Query;  def mapFieldsR(query: Query)(f: Query => Result[Query]): Result[Query]",
+      "purpose": "Structural query utilities used throughout elaboration and by user elaborators to inspect/rewrite subtrees."
+    },
+    {
+      "name": "Query.FilterOrderByOffsetLimit",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "object FilterOrderByOffsetLimit { def apply(pred: Option[Predicate], oss: Option[List[OrderSelection[_]]], offset: Option[Int], limit: Option[Int], child: Query): Query; def unapply(q: Query): Option[(Option[Predicate], Option[List[OrderSelection[_]]], Option[Int], Option[Int], Query)] }",
+      "purpose": "Constructor/extractor that nests Filter/OrderBy/Offset/Limit in canonical order around a child; convenient for paging elaborators."
+    },
+    {
+      "name": "QueryParser",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "trait QueryParser { def parseText(text: String): Result[(List[UntypedOperation], List[UntypedFragment])]; def parseDocument(doc: Ast.Document): Result[(List[UntypedOperation], List[UntypedFragment])] };  object QueryParser { def apply(parser: GraphQLParser): QueryParser }",
+      "purpose": "Parses GraphQL text/AST into untyped operations + fragments (the raw algebra)."
+    },
+    {
+      "name": "QueryCompiler",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class QueryCompiler(parser: QueryParser, schema: Schema, phases: List[Phase]) { def compile(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty): Result[Operation] }",
+      "purpose": "Top-level entry: parse, validate, run all phases, select the requested operation, yielding an executable `Operation`."
+    },
+    {
+      "name": "QueryCompiler.IntrospectionLevel",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "sealed trait IntrospectionLevel; object IntrospectionLevel { case object Full; case object TypenameOnly; case object Disabled }",
+      "purpose": "Controls which introspection fields are permitted during compilation."
+    },
+    {
+      "name": "Elab (monad object)",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "type Elab[T] = StateT[Result, ElabState, T];  object Elab { def unit; def pure[T](t): Elab[T]; def liftR[T](rt: Result[T]): Elab[T]; def schema: Elab[Schema]; def context: Elab[Context]; def vars: Elab[Vars]; def fragments; def fragment(nme: String); def hasField(name: String): Elab[Boolean]; def hasSibling(name: String): Elab[Boolean]; def fieldAlias(name); def resultName; def env(nme: String, value: Any): Elab[Unit]; def env(kv,kvs*); def env(other: Env); def env[T: ClassTag](nme: String): Elab[Option[T]]; def envE[T: ClassTag: TypeName](nme: String): Elab[T]; def localEnv: Elab[Env]; def transformChild(f: Query => Elab[Query]): Elab[Unit]; def transformChild(f: Query => Query); def transformChild(f: Query => Result[Query]); def transform: Elab[Query => Elab[Query]]; def addAttribute(name: String, query: Query = Empty): Elab[Unit]; def attributes; def warning(msg/err); def failure[T](msg/err); def internalError[T](...); def push; def push(context, query); def push(schema, context, query); def pop }",
+      "purpose": "The elaboration DSL. Combinators for reading schema/context/vars, transforming children, binding env, adding attributes, reporting errors, and navigating the query tree via push/pop."
+    },
+    {
+      "name": "QueryCompiler.ElabState",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "case class ElabState(parent: Option[ElabState], schema: Schema, context: Context, vars: Vars, fragments: Map[String, UntypedFragment], query: Query, localEnv: Env, attributes: List[(String, Query)], childTransform: Query => Elab[Query])",
+      "purpose": "Mutable-by-copy state threaded by `Elab`; carries everything an elaborator can see plus the parent chain for push/pop."
+    },
+    {
+      "name": "QueryCompiler.Phase",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "trait Phase { def transformFragments: Elab[Unit] = Elab.unit; def transform(query: Query): Elab[Query]; def transformSelect(fieldName: String, alias: Option[String], child: Query): Elab[Query]; def validateSubselection(fieldName: String, child: Query): Elab[Unit] }",
+      "purpose": "Base class for compiler phases. The default `transform` recursively walks every Query node, pushing/popping context; subclasses override the cases they care about and call `super.transform` for the rest."
+    },
+    {
+      "name": "QueryCompiler.SelectElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "trait SelectElaborator extends Phase { def select(ref: TypeRef, name: String, args: List[Binding], directives: List[Directive]): Elab[Unit]; def elaborateFieldArgs(tpe: NamedType, field: Field, args: List[Binding]): Result[List[Binding]] };  object SelectElaborator { def apply(sel: PartialFunction[(TypeRef, String, List[Binding]), Elab[Unit]]): SelectElaborator; def identity: SelectElaborator }",
+      "purpose": "The user-facing phase. `SelectElaborator { case (Type, field, args) => Elab.transformChild(...) }` consumes arguments and rewrites Selects. `identity` discards all args. Also validates/normalises/permutes args against the schema."
+    },
+    {
+      "name": "QueryCompiler.ComponentElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class ComponentElaborator[F[_]] private (...) extends Phase;  object ComponentElaborator { val TrivialJoin = (q: Query, _: Cursor) => q.success; case class ComponentMapping[F[_]](tpe: TypeRef, fieldName: String, mapping: Mapping[F], join: (Query, Cursor) => Result[Query] = TrivialJoin); def apply[F[_]](mappings: Seq[ComponentMapping[F]]): ComponentElaborator[F] }",
+      "purpose": "Inserts `Component` nodes at (type,field) boundaries between composed mappings."
+    },
+    {
+      "name": "QueryCompiler.EffectElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class EffectElaborator[F[_]] private (effects: (Context, String) => Option[EffectHandler[F]]) extends Phase;  object EffectElaborator { case class EffectMapping[F[_]](tpe: TypeRef, fieldName: String, handler: EffectHandler[F]); def apply[F[_]](effects: (Context, String) => Option[EffectHandler[F]]): EffectElaborator[F] }",
+      "purpose": "Wraps Selects whose (context,field) has an effect handler in an `Effect` node."
+    },
+    {
+      "name": "QueryCompiler.QuerySizeValidator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "class QuerySizeValidator(maxDepth: Int, maxWidth: Int) extends Phase",
+      "purpose": "A phase that fails compilation if the query exceeds depth/width limits (DoS guard)."
+    },
+    {
+      "name": "QueryCompiler.VariablesSkipAndFragmentElaborator / MergeFields / IntrospectionElaborator",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "object VariablesSkipAndFragmentElaborator extends Phase;  object MergeFields extends Phase;  class IntrospectionElaborator(level: IntrospectionLevel) extends Phase;  object IntrospectionElaborator { def apply(level: IntrospectionLevel): Option[IntrospectionElaborator] }",
+      "purpose": "Built-in phases auto-prepended by the compiler: substitute variables + handle skip/include + expand fragments; apply field-merge rules; elaborate introspection queries."
+    },
+    {
+      "name": "UntypedOperation",
+      "file": "modules/core/src/main/scala/operation.scala",
+      "signature": "sealed trait UntypedOperation { val name: Option[String]; val query: Query; val variables: UntypedVarDefs; val directives: List[Directive]; def rootTpe(schema: Schema): Result[NamedType] };  object UntypedOperation { case class UntypedQuery(...); case class UntypedMutation(...); case class UntypedSubscription(...) }",
+      "purpose": "Parsed-but-uncompiled operation; `rootTpe` resolves Query/Mutation/Subscription root type."
+    },
+    {
+      "name": "Operation",
+      "file": "modules/core/src/main/scala/operation.scala",
+      "signature": "case class Operation(query: Query, rootTpe: NamedType, directives: List[Directive])",
+      "purpose": "The compiled, directly-interpretable result of `QueryCompiler.compile`."
+    },
+    {
+      "name": "Env",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "sealed trait Env { def add[T](items: (String, T)*): Env; def add(env: Env): Env; def contains(name: String): Boolean; def get[T: ClassTag](name: String): Option[T]; def isEmpty: Boolean; def getR[A: ClassTag: TypeName](name: String): Result[A]; def addFromQuery(query: Query): Env };  object Env { def empty: Env; def apply[T](items: (String, T)*): Env }",
+      "purpose": "Immutable, type-tagged string->Any bag used for both elaboration-time (`Elab.env`) and runtime (`Environment` node, `Cursor.env`) bindings."
+    },
+    {
+      "name": "Value",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "sealed trait Value;  object Value { case class IntValue(value: Int); case class FloatValue(value: Double); case class StringValue(value: String); case class BooleanValue(value: Boolean); case class IDValue(value: String); case class EnumValue(name: String); case class ListValue(elems: List[Value]); case class ObjectValue(fields: List[(String, Value)]); case class VariableRef(name: String); case object NullValue; case object AbsentValue }",
+      "purpose": "Argument value ADT carried in `Binding`. SelectElaborator cases pattern-match these (e.g. `Binding(\"id\", IDValue(id))`). `AbsentValue` distinguishes a missing optional arg from `NullValue`."
+    },
+    {
+      "name": "Directive",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class Directive(name: String, args: List[Binding])",
+      "purpose": "A query directive (e.g. @skip/@include). Skip/include are consumed by VariablesSkipAndFragmentElaborator; others are passed to the SelectElaborator's `select(..., directives)`."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Parse a query string into the untyped algebra",
+      "code": "import grackle._\nimport grackle.Query._\nimport grackle.Value._\n\nval queryParser = QueryParser(\n  GraphQLParser(GraphQLParser.defaultConfig.copy(terseError = false)))\n\nval query = \"\"\"\n  query {\n    character(id: \"1000\") {\n      name\n    }\n  }\n\"\"\"\n\nval expected =\n  UntypedSelect(\n    \"character\",\n    None,\n    List(Binding(\"id\", StringValue(\"1000\"))),\n    Nil,\n    UntypedSelect(\"name\", None, Nil, Nil, Empty)\n  )\n\nval res = queryParser.parseText(query).map(_._1)\n// res == Result.Success(List(UntypedOperation.UntypedQuery(None, expected, Nil, Nil)))",
+      "explanation": "Parsing alone (no schema) yields `UntypedOperation`s whose `.query` is the untyped algebra: an `UntypedSelect` tree carrying raw `Binding(\"id\", StringValue(\"1000\"))` arguments. Leaf fields have `child == Empty`. Verbatim from CompilerSuite 'simple query'.",
+      "needsDb": false
+    },
+    {
+      "title": "Define a SelectElaborator that turns arguments into algebra",
+      "code": "import grackle._\nimport grackle.Predicate._\nimport grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\nimport grackle.syntax._\n\nobject AtomicMapping extends TestMapping {\n  val schema =\n    schema\"\"\"\n      type Query { character(id: String!): Character }\n      type Character { id: String!  name: String  friends: [Character!] }\n    \"\"\"\n\n  val QueryType = schema.ref(\"Query\")\n  val CharacterType = schema.ref(\"Character\")\n\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"character\", List(Binding(\"id\", StringValue(id)))) =>\n      Elab.transformChild(child => Unique(Filter(Eql(CharacterType / \"id\", Const(id)), child)))\n  }\n}\n\n// AtomicMapping.compiler.compile(\"query { character(id: \\\"1000\\\") { name friends { name } } }\")\n//   .map(_.query) == Result.Success(\n//     Select(\"character\", None,\n//       Unique(Filter(Eql(CharacterType / \"id\", Const(\"1000\")),\n//         Select(\"name\") ~ Select(\"friends\", Select(\"name\"))))))",
+      "explanation": "The canonical pattern: a `SelectElaborator` partial function matched on `(TypeRef, fieldName, List[Binding])` returns `Elab.transformChild`, which rewrites the elaborated child into `Unique(Filter(...))`. After compilation the `UntypedSelect` with an `id` arg has become an interpretable `Select`/`Unique`/`Filter` tree. Verbatim from CompilerSuite 'simple selector elaborated query' + AtomicMapping.",
+      "needsDb": false
+    },
+    {
+      "title": "Bind elaboration-time env so a CursorField can read field arguments",
+      "code": "import grackle._\nimport grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\nimport grackle.syntax._\n\nobject EnvironmentMapping extends ValueMapping[IO] {\n  val schema = schema\"\"\"\n    type Query { nested: Nested! }\n    type Nested { sum(x: Int!, y: Int!): Int! }\n  \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val NestedType = schema.ref(\"Nested\")\n\n  // CursorField reads the values the elaborator stashed in the env\n  def sum(c: Cursor): Result[Int] =\n    (for { x <- c.env[Int](\"x\"); y <- c.env[Int](\"y\") } yield x + y).toResult(\"Missing argument\")\n\n  override val selectElaborator = SelectElaborator {\n    case (NestedType, \"sum\", List(Binding(\"x\", IntValue(x)), Binding(\"y\", IntValue(y)))) =>\n      Elab.env(\"x\" -> x, \"y\" -> y)\n  }\n}\n\n// EnvironmentMapping.compileAndRun(\"query { nested { sum(x: 13, y: 23) } }\")\n//   yields { \"data\": { \"nested\": { \"sum\": 36 } } }",
+      "explanation": "`Elab.env(\"x\" -> x, \"y\" -> y)` writes args into the node's local env; the SelectElaborator materialises an `Environment` node so those values survive into interpretation, where the `CursorField` reads them via `cursor.env[Int]`. This is how computed fields consume their arguments. Adapted from EnvironmentSuite (the full mapping is in EnvironmentSuite.scala).",
+      "needsDb": false
+    },
+    {
+      "title": "Seed an external Env at compile time",
+      "code": "import grackle.syntax._\n\n// def url(c: Cursor): Result[String] =\n//   c.env[Boolean](\"secure\")\n//     .map(s => if (s) \"https://localhost/\" else \"http://localhost/\").toResult(\"Missing argument\")\n\nval res = EnvironmentMapping.compileAndRun(\n  \"query { nested { url } }\",\n  env = Env(\"secure\" -> true))\n// yields { \"data\": { \"nested\": { \"url\": \"https://localhost/\" } } }",
+      "explanation": "Both `QueryCompiler.compile` and `Mapping.compileAndRun` take `env: Env = Env.empty`. Values seeded here are visible to every `Cursor.env` lookup during execution — used for request-scoped context (auth, feature flags). Verbatim behaviour from EnvironmentSuite 'field computed using external value (2)'.",
+      "needsDb": false
+    },
+    {
+      "title": "Elaborate pagination/order/count nodes",
+      "code": "import grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\n\noverride val selectElaborator = SelectElaborator {\n  // characters(offset, limit) -> Limit(.., Offset(.., child))\n  case (QueryType, \"characters\",\n        List(Binding(\"offset\", IntValue(offset)), Binding(\"limit\", IntValue(limit)))) =>\n    Elab.transformChild(child => Limit(limit, Offset(offset, child)))\n\n  // numberOfFriends -> replace selection set with a Count over friends\n  case (CharacterType | HumanType | DroidType, \"numberOfFriends\", _) =>\n    Elab.transformChild(_ => Count(Select(\"friends\")))\n}",
+      "explanation": "Shows `Limit`/`Offset` and `Count` produced from arguments. Note `Count(Select(\"friends\"))` *replaces* the (empty) child of a scalar field with a counting subquery. Wildcard `_` on args ignores them. Verbatim from StarWarsData.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Filter + OrderBy + Offset + Limit via FilterOrderByOffsetLimit",
+      "code": "import grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Predicate._\n\nElab.transformChild { child =>\n  FilterOrderByOffsetLimit(\n    pred   = Some(LtEql(CountryType / \"population\", Const(max))),\n    oss    = Some(List(OrderSelection[Int](CountryType / \"population\"))),\n    offset = Some(off),\n    limit  = Some(lim),\n    child  = child)\n}",
+      "explanation": "`FilterOrderByOffsetLimit.apply` nests the four nodes in canonical order (Limit(Offset(OrderBy(Filter(...))))). `OrderSelection[T: Order]` needs a cats `Order[T]` and takes a `Term` (e.g. `CountryType / \"population\"`); `ascending`/`nullsLast` default true. Pattern derived from demo WorldMapping.scala and SqlPaging2Mapping.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Add a synthetic attribute select (computed count)",
+      "code": "import grackle.Query._\nimport grackle.QueryCompiler._\n\n// inside a SelectElaborator case:\nElab.addAttribute(\"numCountries\", Count(Select(\"items\", Select(\"code\"))))",
+      "explanation": "`Elab.addAttribute(name, query)` injects an extra field that is merged into the elaborated Select (via `mergeQueries`) even though the client never requested it. The interpreter then exposes it for a `CursorField` (here used to compute a `hasMore` flag for paging). Verbatim shape from SqlPaging2Mapping.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Write a custom Phase that wraps SelectElaborator",
+      "code": "import grackle._\nimport grackle.Query._\nimport grackle.QueryCompiler._\n\nobject PreserveArgsElaborator extends SelectElaborator {\n  case class Preserved(args: List[Binding], directives: List[Directive])\n\n  override def transform(query: Query): Elab[Query] = query match {\n    case UntypedSelect(fieldName, _, _, _, _) =>\n      for {\n        t         <- super.transform(query)\n        preserved <- Elab.envE[Preserved](\"preserved\")\n      } yield subst(t, fieldName, preserved)\n    case other => super.transform(other)\n  }\n\n  def select(ref: TypeRef, name: String, args: List[Binding],\n             directives: List[Directive]): Elab[Unit] =\n    Elab.env(\"preserved\", Preserved(args, directives))\n}",
+      "explanation": "Shows the lower-level `SelectElaborator` API: override `transform` and implement `select(ref, name, args, directives)` directly (instead of the partial-function factory). `Elab.envE[T]` retrieves a previously-bound env value, failing if absent. Verbatim from PreserveArgsElaborator.scala (test helper).",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "Leaf vs non-leaf subselection is validated, not silently allowed: a leaf field with a non-empty `{ ... }` fails with \"Leaf field 'x' of T must have an empty subselection set\"; a non-leaf field with an empty selection fails with \"Non-leaf field 'x' of T must have a non-empty subselection set\". See `validateSubselection` and CompilerSuite invalid-subselection tests.",
+    "Unknown arguments fail compilation: `elaborateFieldArgs` rejects any arg name not declared on the schema field (\"Unknown argument(s) 'quux' in field character of type Query\"). A SelectElaborator case can only match args that survived this check.",
+    "Argument matching in SelectElaborator is positional/structural on the *normalised* arg list. `elaborateFieldArgs` permutes args into schema-declared order and fills defaults, so cases like `List(Binding(\"offset\", IntValue(o)), Binding(\"limit\", IntValue(l)))` assume that canonical order, not source order. If your pattern doesn't match, the field is left with its args un-eliminated.",
+    "Optional/absent arguments arrive as `AbsentValue`, not `NullValue`. Elaborators must match `Binding(\"namePattern\", AbsentValue)` separately from a provided value (see WorldMapping `numCities`). Forgetting the AbsentValue case means the elaborator silently no-ops.",
+    "`Elab.transformChild` callbacks compose with `andThen`, not replace: `ElabState.addChildTransform` chains each transform via `childTransform.andThen(_.flatMap(f))`. Two cases that both call transformChild on the same node both run, in order.",
+    "`Elab.env(...)` writes only to the *local* env of the current node; it becomes an `Environment` node wrapping that Select. It is NOT visible to siblings, only to the node's own children/cursor. `hasSibling`/sibling inspection goes through the parent state, a different mechanism.",
+    "Compiler auto-prepends phases: regardless of your `compilerPhases`, the pipeline is `IntrospectionElaborator? :: VariablesSkipAndFragmentElaborator :: MergeFields :: yourPhases`. So your SelectElaborator always sees variable-substituted, fragment-expanded, field-merged, typed `Select` nodes — never raw fragment spreads or variable refs.",
+    "`SelectElaborator.transform` only fires on `UntypedSelect`; ComponentElaborator/EffectElaborator fire on already-typed `Select`. Ordering in `compilerPhases` matters: selectElaborator must run before componentElaborator/effectElaborator (the default order), or the latter see UntypedSelect and fall through to `super.transform`.",
+    "`mergeQueries` (typed) and `mergeUntypedQueries` (untyped) are distinct: MergeFields uses the untyped merger; mixing them on the wrong stage silently drops or fails to merge selects. They key on `(name, alias)` and recursively merge children; `__typename` and adjacent `Narrow`s of the same type get special handling.",
+    "Variable validation runs before phases and reports BOTH undefined and (when `reportUnused=true`, the default) unused variables and fragments as warnings/errors. Set `reportUnused=false` to suppress unused-warnings (e.g. for persisted/partial queries).",
+    "Query shorthand (`{ ... }`, no `query` keyword) parses to `UntypedQuery(None, ...)`. The compiler refuses to combine a nameless shorthand op with other operations (\"Query shorthand cannot be combined with multiple operations\") and requires `name=` to disambiguate when multiple named ops are present.",
+    "`Env.get[T]` is type-tag filtered via `classTag[T].unapply`: a value stored as the wrong runtime type returns `None`, not the value. `Elab.envE`/`Env.getR` turn that miss into a descriptive Result failure; plain `env[T]` silently yields None.",
+    "`Count` replaces the child it is built from rather than wrapping the original selection: `Elab.transformChild(_ => Count(Select(\"friends\")))` discards the incoming child entirely. The original scalar field's empty child is intentionally thrown away.",
+    "`QuerySizeValidator` counts a `Count(_)` node and any empty-child Select as depth+1/width+1, and resolves fragment spreads via the fragment map. It must be added as a user phase (e.g. `super.compilerPhases :+ querySizeValidator`); it is not on by default."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+      "region": "tests 'simple query'..'introspection query' (lines 36-272) and AtomicMapping object (lines 561-581)",
+      "whatItShows": "Parsing GraphQL text to the UntypedSelect/Group/Binding algebra (expected trees written out verbatim), plus a minimal SelectElaborator. Ideal reference for 'what the algebra looks like'."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+      "region": "test 'simple selector elaborated query' (lines 274-305)",
+      "whatItShows": "Before/after: a GraphQL string and the exact compiled `Select(Unique(Filter(Eql(...), ...)))` algebra it produces. Perfect 'elaboration in action' snippet."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+      "region": "tests 'simple component elaborated query' (lines 390-444) + TestComposedMapping (lines 590-640)",
+      "whatItShows": "How ComponentElaborator inserts nested `Component(mapping, TrivialJoin, Select(...))` nodes across composed mappings."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+      "region": "invalid-* tests (lines 307-388) and operations-* tests (498-558)",
+      "whatItShows": "Exact error messages for leaf/non-leaf subselection violations, unknown fields/args, and operation-selection rules. Reference table material."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/EnvironmentSuite.scala",
+      "region": "EnvironmentMapping (lines 28-99) + tests (101-312)",
+      "whatItShows": "End-to-end: SelectElaborator binds args via `Elab.env`, a `CursorField` reads them via `cursor.env`, and external `Env(\"secure\" -> true)` seeded at compile time. Self-contained, no DB."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/PredicatesSuite.scala",
+      "region": "ItemMapping (lines 40-97)",
+      "whatItShows": "A complete ValueMapping with a SelectElaborator that emits `Filter(Contains(...))` / `Filter(Eql(...))` from ID/Int args, plus hidden CursorField attributes — the mapping behind AttributesSuite."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/PreserveArgsElaborator.scala",
+      "region": "whole file (lines 22-63)",
+      "whatItShows": "Low-level custom Phase: overriding `SelectElaborator.transform`, implementing `select(ref,name,args,directives)`, and using `Elab.envE`/`Elab.env` plus a manual `subst` over the Query tree."
+    },
+    {
+      "file": "modules/core/src/test/scala/starwars/StarWarsData.scala",
+      "region": "selectElaborator + QuerySizeValidator wiring (lines 224-243)",
+      "whatItShows": "Realistic multi-case SelectElaborator: hero/character lookups (Unique+Filter), characters pagination (Limit+Offset), numberOfFriends (Count), and registering a QuerySizeValidator phase via `compilerPhases`."
+    },
+    {
+      "file": "demo/src/main/scala/demo/world/WorldMapping.scala",
+      "region": "selectElaborator (lines 168-226)",
+      "whatItShows": "Production-style elaborator composing Filter/OrderBy(OrderSelections(OrderSelection[Int](...)))/Offset/Limit and handling AbsentValue vs StringValue for optional args, plus Count subqueries."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlPaging2Mapping.scala",
+      "region": "PagingConfig (lines 120-156)",
+      "whatItShows": "`Elab.addAttribute` injecting a synthetic Count for hasMore, `FilterOrderByOffsetLimit` for paging, and env round-tripping (`Elab.env`/`Elab.envE`/`Cursor.envR`)."
+    },
+    {
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "region": "Elab object (lines 733-920) and Phase.transform (lines 982-1106)",
+      "whatItShows": "The full Elab combinator surface and the default Phase traversal (push/pop over every Query node). Source-of-truth for a reference page on the elaboration monad."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "compilerPhases/componentElaborator/effectElaborator/compiler (lines 1391-1428)",
+      "whatItShows": "How a Mapping wires selectElaborator + componentElaborator + effectElaborator into a QueryCompiler. The plumbing a how-to page needs."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "The Query algebra (ADT reference)",
+      "diataxisType": "reference",
+      "outline": [
+        "Overview: Query as a sealed trait; render and ~ combinators",
+        "Interpretable nodes: Select, Group, Unique, Filter, Limit, Offset, OrderBy (+OrderSelections/OrderSelection), Count, Narrow, Component, Effect, Environment, TransformCursor, Introspect, Empty - signature + one-line semantics each",
+        "Pre-elaboration nodes: UntypedSelect, UntypedFragmentSpread, UntypedInlineFragment, UntypedFragment, UntypedVarDef, Binding, Value ADT",
+        "Structural helpers: ungroup, children, extractChild, substChild, hasField, fieldAlias, mapFields/mapFieldsR, mergeQueries vs mergeUntypedQueries, FilterOrderByOffsetLimit",
+        "Type aliases: UntypedVarDefs / VarDefs / Vars"
+      ]
+    },
+    {
+      "title": "The compiler pipeline: from query string to Operation",
+      "diataxisType": "explanation",
+      "outline": [
+        "The three stages: parse (QueryParser) -> validate -> elaborate (phases)",
+        "QueryCompiler.compile parameters (name, untypedVars, introspectionLevel, reportUnused, env) and what each does",
+        "Validation: variables & fragments (undefined/unused/cycles), field mergeability rules",
+        "The auto-prepended phases and why order matters (IntrospectionElaborator, VariablesSkipAndFragmentElaborator, MergeFields, then user phases)",
+        "UntypedOperation vs Operation; rootTpe resolution for query/mutation/subscription"
+      ]
+    },
+    {
+      "title": "The Elab monad and writing compiler phases",
+      "diataxisType": "reference",
+      "outline": [
+        "Elab = StateT[Result, ElabState, T]: what state is threaded (ElabState fields)",
+        "Reader combinators: context, schema, vars, fragments, hasField/hasSibling/resultName/fieldAlias",
+        "Writer combinators: transformChild (3 overloads), env (4 overloads) + envE, addAttribute, push/pop",
+        "Error reporting: failure, warning, internalError, liftR",
+        "Phase trait: transform default traversal, transformSelect, validateSubselection, transformFragments",
+        "Built-in phases reference: ComponentElaborator, EffectElaborator, QuerySizeValidator, IntrospectionElaborator"
+      ]
+    },
+    {
+      "title": "How to write a SelectElaborator",
+      "diataxisType": "how-to",
+      "outline": [
+        "The factory: SelectElaborator { case (TypeRef, fieldName, List[Binding]) => Elab[Unit] }",
+        "Pattern-matching arguments by Value type (StringValue/IntValue/IDValue/EnumValue/AbsentValue)",
+        "Eliminating args with Elab.transformChild -> Unique/Filter/Limit/Offset/OrderBy",
+        "Computing fields from args with Elab.env + a CursorField that reads cursor.env",
+        "Replacing a selection with Count; injecting synthetic fields with addAttribute",
+        "Wiring it into a Mapping (selectElaborator override / compilerPhases) and adding a QuerySizeValidator",
+        "The low-level form: extending SelectElaborator and overriding transform/select (PreserveArgs pattern)"
+      ]
+    },
+    {
+      "title": "Elaboration & runtime environments (Env)",
+      "diataxisType": "explanation",
+      "outline": [
+        "What Env is: immutable, type-tagged string->Any bag (EmptyEnv/NonEmptyEnv)",
+        "Elaboration-time env (Elab.env / localEnv) -> materialised as Environment nodes",
+        "Runtime env: seeding external context via compile/compileAndRun env param; reading with Cursor.env/envR",
+        "addFromQuery and how Environment nodes propagate",
+        "Gotchas: type-tag filtering in get[T], local-only visibility, env vs sibling inspection"
+      ]
+    }
+  ]
+}

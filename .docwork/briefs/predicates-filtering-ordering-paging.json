@@ -1,0 +1,407 @@
+{
+  "subsystem": "Predicates, filtering, ordering, paging",
+  "summary": "Grackle models query-time filtering, ordering, and paging as a small reified algebra layered on the `Query` ADT. A `Term[T]` is a serializable, introspectable function `Cursor => Result[T]` (so interpreters like the SQL module can compile it into a WHERE/ORDER BY clause instead of running it in-memory); `Path` builds typed term paths from a schema `Type` (e.g. `CountryType / \"population\"`). `Predicate extends Term[Boolean]` and its case classes (`Eql`, `NEql`, `Lt`/`LtEql`/`Gt`/`GtEql`, `And`/`Or`/`Not`, `In`, `Contains`, `IsNull`, `Matches`, `StartsWith`, plus the SQL-module `Like`) are the leaves of `Filter(pred, child)`. Ordering and paging are separate `Query` nodes: `OrderBy(OrderSelections(...), child)`, `Offset(n, child)`, `Limit(n, child)`, and `Count(child)`. Developers wire user arguments to these nodes inside a `SelectElaborator` using the `Elab` API (chiefly `Elab.transformChild`), and the `FilterOrderByOffsetLimit` constructor/extractor assembles the four-node stack in the canonical order. Paging beyond plain offset/limit (counted totals, \"has more\", nested paging) is implemented by combining these nodes with `Count`, `CursorField`, `TransformCursor`, and the elaboration environment — there is no built-in Relay/connection (edges/pageInfo/endCursor) type in this codebase.",
+  "keyConcepts": [
+    {
+      "name": "Term[T] as a reified function",
+      "explanation": "`Term[T] extends Product with Serializable` and is essentially a reified `Cursor => Result[T]` (`def apply(c: Cursor): Result[T]`). It is deliberately NOT an arbitrary function so interpreters can introspect it (via `children`, `fold`, `exists`, `forall`, `forallR`) and compile it to a backend query (e.g. SQL WHERE clauses). This is the foundational abstraction for filtering and ordering."
+    },
+    {
+      "name": "Path / asTerm (UniquePath vs ListPath)",
+      "explanation": "`Path` is a typed cursor path rooted at a `Type`. You build one with `Type./(field)` (e.g. `CountryType / \"population\"`), and an implicit (`Term.path2Term` / `TermLow.path2ListTerm`) converts it to a `Term[A]`. `Path.asTerm` chooses `PathTerm.UniquePath` for scalar paths and `PathTerm.ListPath` for list-valued paths based on `rootTpe.pathIsList(path)`. This is why `Contains` takes a `Term[List[T]]` for a list field while `Eql` takes a `Term[T]` for a scalar."
+    },
+    {
+      "name": "Predicate ADT",
+      "explanation": "`Predicate extends Term[Boolean]`. Leaves include equality (`Eql`/`NEql` need `Eq[T]`), ordering (`Lt`/`LtEql`/`Gt`/`GtEql` need `Order[T]`), boolean combinators (`And`/`Or`/`Not`, plus `True`/`False`), set membership (`In[T]` over a static `List[T]`), list membership (`Contains[T]`), null tests (`IsNull[T]` over `Term[Option[T]]`), and string matching (`Matches` regex, `StartsWith`). `Like` (case-(in)sensitive SQL-style `%`/`_` matching) lives in the sql-core module, not core."
+    },
+    {
+      "name": "Filter / OrderBy / Offset / Limit / Count query nodes",
+      "explanation": "Filtering and paging are `Query` ADT nodes that wrap a `child` query: `Filter(pred, child)` keeps matching elements; `OrderBy(OrderSelections(sels), child)` sorts; `Offset(num, child)` drops the first num; `Limit(num, child)` truncates; `Count(child)` replaces a list with its element count. They compose by nesting."
+    },
+    {
+      "name": "OrderSelection / OrderSelections",
+      "explanation": "`OrderSelection[T: Order](term, ascending = true, nullsLast = true)` describes one sort key over a `Term[T]`; multiple selections are combined in priority order inside `OrderSelections(List(...))`, which can sort an in-memory `Seq[Cursor]`. `ascending` controls direction; `nullsLast` controls null placement (SQL backends pass `nullsHigh` here)."
+    },
+    {
+      "name": "FilterOrderByOffsetLimit constructor/extractor",
+      "explanation": "`Query.FilterOrderByOffsetLimit` is the idiomatic way to build the whole stack from `Option`s: it nests `Filter` innermost, then `OrderBy`, then `Offset`, then `Limit` outermost. Its matching `unapply` lets interpreters destructure an arbitrary nesting back into `(pred, oss, offset, limit, child)`. Used heavily by the paging mappings."
+    },
+    {
+      "name": "Elaboration via Elab.transformChild",
+      "explanation": "Filters/orders/limits are installed during compilation in a `SelectElaborator`. The elaborator matches `(ParentType, fieldName, List(Binding(...)))` and returns an `Elab[Unit]`, most commonly `Elab.transformChild(child => ...)` which rewrites the child query to add the desired nodes. `transformChild` is overloaded to accept `Query => Query`, `Query => Result[Query]`, or `Query => Elab[Query]`."
+    },
+    {
+      "name": "Paging patterns (offset/limit, counted, has-more)",
+      "explanation": "Plain offset/limit just emits `Offset`/`Limit`. 'Counted' paging (SqlPaging1/2) exposes `offset`/`limit`/`total` by stashing paging info in the `Elab` environment, computing `items` via `FilterOrderByOffsetLimit` and `total` via `Count`. 'Has-more' paging (SqlPaging3) overfetches by one (`limit + 1`), uses `TransformCursor` + `ListTransformCursor` to trim the extra row, and reports `hasMore`. There is no Relay edges/cursor connection type in the repo; cursor-based paging is built by hand on these primitives."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Term[T]",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "trait Term[T] extends Product with Serializable { def apply(c: Cursor): Result[T]; def children: List[Term[_]]; def fold[Acc](acc: Acc)(f: (Acc, Term[_]) => Acc): Acc; def exists(f: Term[_] => Boolean): Boolean; def forall(f: Term[_] => Boolean): Boolean; def forallR(f: Term[_] => Result[Boolean]): Result[Boolean] }",
+      "purpose": "Reified, introspectable function over a Cursor; base type of all predicates and order/path terms."
+    },
+    {
+      "name": "Path",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "trait Path { def rootTpe: Type; def path: List[String]; def tpe: Type; def asTerm[A]: Term[A]; def /(elem: String): Path; def %(ntpe: NamedType): Path; def isRoot = path.isEmpty }",
+      "purpose": "Typed path from a root Type to a field; converts to a Term via asTerm (UniquePath or ListPath). Built via Path.from(tpe) or Type / \"field\"."
+    },
+    {
+      "name": "Path.from",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "def from(tpe: Type): Path  // returns PathImpl(tpe, Nil, tpe)",
+      "purpose": "Construct an empty Path rooted at a type; usually you instead use `Type / \"field\"` which delegates here."
+    },
+    {
+      "name": "Type./ (path syntax)",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "def /(pathElement: String): Path = Path.from(this) / pathElement",
+      "purpose": "The `CountryType / \"population\"` syntax used throughout elaborators to build predicate/order terms from a schema Type."
+    },
+    {
+      "name": "PathTerm.UniquePath",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class UniquePath[A](path: List[String]) extends Term[A] with PathTerm",
+      "purpose": "Term for a scalar (non-list) path; expects exactly one ScalarFocus element at the path."
+    },
+    {
+      "name": "PathTerm.ListPath",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class ListPath[A](path: List[String]) extends Term[List[A]] with PathTerm",
+      "purpose": "Term for a list-valued path; produces a List[A]. Chosen automatically by asTerm when rootTpe.pathIsList(path)."
+    },
+    {
+      "name": "Predicate",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "trait Predicate extends Term[Boolean]",
+      "purpose": "A Term[Boolean]; the thing Filter holds."
+    },
+    {
+      "name": "Predicate.Const",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class Const[T](v: T) extends Term[T]",
+      "purpose": "A literal term; the right-hand side of most comparisons, e.g. Eql(CountryType / \"code\", Const(code))."
+    },
+    {
+      "name": "Predicate.True / Predicate.False",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case object True extends Predicate ; case object False extends Predicate",
+      "purpose": "Identity/absorbing predicates used by the and/or smart constructors."
+    },
+    {
+      "name": "Predicate.And / Or / Not",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class And(x: Predicate, y: Predicate) extends Predicate ; case class Or(x: Predicate, y: Predicate) extends Predicate ; case class Not(x: Predicate) extends Predicate",
+      "purpose": "Boolean combinators. And also has object And.combineAll(preds: List[Predicate]): Predicate."
+    },
+    {
+      "name": "Predicate.and / Predicate.or",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "def and(props: List[Predicate]): Predicate ; def or(props: List[Predicate]): Predicate",
+      "purpose": "Smart constructors that fold a list of predicates into a single And/Or chain, short-circuiting True/False."
+    },
+    {
+      "name": "Predicate.Eql / NEql",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class Eql[T: Eq](x: Term[T], y: Term[T]) extends Predicate ; case class NEql[T: Eq](x: Term[T], y: Term[T]) extends Predicate",
+      "purpose": "Equality / inequality; require an Eq[T] instance. Eql exposes eqInstance and subst; In.fromEqls can fold many Eqls into an In."
+    },
+    {
+      "name": "Predicate.Contains",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class Contains[T: Eq](x: Term[List[T]], y: Term[T]) extends Predicate",
+      "purpose": "True if the list term contains the element y. Used for filtering on list-valued fields (e.g. tags)."
+    },
+    {
+      "name": "Predicate.Lt / LtEql / Gt / GtEql",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class Lt[T: Order](x: Term[T], y: Term[T]) extends Predicate ; case class LtEql[T: Order](...) ; case class Gt[T: Order](...) ; case class GtEql[T: Order](...)",
+      "purpose": "Ordering comparisons; require an Order[T] instance."
+    },
+    {
+      "name": "Predicate.IsNull",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class IsNull[T](x: Term[Option[T]], isNull: Boolean) extends Predicate",
+      "purpose": "Null/non-null test over an Option-valued term. isNull=true matches absent; e.g. IsNull[Int](CountryType / \"indepyear\", isNull = !indep)."
+    },
+    {
+      "name": "Predicate.In",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class In[T: Eq](x: Term[T], y: List[T]) extends Predicate ; object In { def fromEqls[T](eqls: List[Eql[T]]): Option[In[T]] }",
+      "purpose": "Set membership against a static List[T]. fromEqls collapses a homogeneous list of Eql-against-Const into a single In."
+    },
+    {
+      "name": "Predicate.Matches / StartsWith",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class Matches(x: Term[String], r: Regex) extends Predicate ; case class StartsWith(x: Term[String], prefix: String) extends Predicate",
+      "purpose": "String regex / prefix predicates in core."
+    },
+    {
+      "name": "Predicate term helpers (AndB/OrB/XorB/NotB/ToUpperCase/ToLowerCase)",
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "signature": "case class AndB(x: Term[Int], y: Term[Int]) extends Term[Int] ; case class ToUpperCase(x: Term[String]) extends Term[String] ; ...",
+      "purpose": "Non-boolean Term transformers (bitwise Int ops and String case folding) usable inside predicates."
+    },
+    {
+      "name": "Like (SQL module)",
+      "file": "modules/sql-core/src/main/scala-3/Like.scala (and scala-2/Like.scala)",
+      "signature": "case class Like(x: Term[String] | Term[Option[String]], pattern: String, caseInsensitive: Boolean) extends Predicate",
+      "purpose": "SQL LIKE-style matching with % and _ wildcards (compiled to regex in-memory, to LIKE/ILIKE in SQL). Lives in grackle.sql, not core. Note the union-type first param so it accepts nullable or non-nullable string terms."
+    },
+    {
+      "name": "Query.Filter",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Filter(pred: Predicate, child: Query) extends Query",
+      "purpose": "Retains only child elements satisfying pred."
+    },
+    {
+      "name": "Query.Offset",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Offset(num: Int, child: Query) extends Query",
+      "purpose": "Drops the first num elements of the list-producing child."
+    },
+    {
+      "name": "Query.Limit",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Limit(num: Int, child: Query) extends Query",
+      "purpose": "Limits child results to num elements."
+    },
+    {
+      "name": "Query.OrderBy",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class OrderBy(selections: OrderSelections, child: Query) extends Query",
+      "purpose": "Orders child results by the given selections."
+    },
+    {
+      "name": "Query.OrderSelections",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class OrderSelections(selections: List[OrderSelection[_]]) { def order(lc: Seq[Cursor]): Seq[Cursor] }",
+      "purpose": "Ordered list of sort keys; order() sorts an in-memory Seq[Cursor] by applying keys in priority order."
+    },
+    {
+      "name": "Query.OrderSelection",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class OrderSelection[T: Order](term: Term[T], ascending: Boolean = true, nullsLast: Boolean = true) { def apply(x: Cursor, y: Cursor): Int; def subst(term: Term[T]): OrderSelection[T] }",
+      "purpose": "Single sort key over a Term[T]; ascending controls direction, nullsLast controls null placement. Requires Order[T]."
+    },
+    {
+      "name": "Query.Count",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class Count(child: Query) extends Query",
+      "purpose": "Computes the number of top-level elements of child; used for total/hasMore in paging (compiles to SQL COUNT)."
+    },
+    {
+      "name": "Query.TransformCursor",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "case class TransformCursor(f: Cursor => Result[Cursor], child: Query) extends Query",
+      "purpose": "Post-processes the result cursor; used in has-more paging to trim the overfetched extra row via ListTransformCursor."
+    },
+    {
+      "name": "Query.FilterOrderByOffsetLimit",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "object FilterOrderByOffsetLimit { def apply(pred: Option[Predicate], oss: Option[List[OrderSelection[_]]], offset: Option[Int], limit: Option[Int], child: Query): Query ; def unapply(q: Query): Option[(Option[Predicate], Option[List[OrderSelection[_]]], Option[Int], Option[Int], Query)] }",
+      "purpose": "Builds (and destructures) the canonical Filter -> OrderBy -> Offset -> Limit nesting from Options. Preferred over hand-nesting the four nodes."
+    },
+    {
+      "name": "Elab.transformChild",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def transformChild(f: Query => Elab[Query]): Elab[Unit] ; def transformChild(f: Query => Query)(implicit dummy: DummyImplicit): Elab[Unit] ; def transformChild(f: Query => Result[Query])(implicit dummy1, dummy2): Elab[Unit]",
+      "purpose": "Primary elaborator hook to wrap the child query with Filter/OrderBy/Offset/Limit. Overloaded for plain, Result, and Elab return types."
+    },
+    {
+      "name": "Elab.env / envE",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def env(nme: String, value: Any): Elab[Unit] ; def env[T: ClassTag](nme: String): Elab[Option[T]] ; def envE[T: ClassTag: TypeName](nme: String): Elab[T]",
+      "purpose": "Stash and retrieve paging state (offset/limit/flags) in the elaboration environment so sibling fields (items/total/hasMore) can read it."
+    },
+    {
+      "name": "Elab.addAttribute / hasField / fieldAlias",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def addAttribute(name: String, query: Query = Empty): Elab[Unit] ; def hasField(name: String): Elab[Boolean] ; def fieldAlias(name: String): Elab[Option[String]]",
+      "purpose": "addAttribute injects a hidden Count attribute for totals; hasField/fieldAlias drive conditional overfetch logic in has-more paging."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Filter a list field by exact id (Eql + Const) in a SelectElaborator",
+      "code": "import grackle._\nimport grackle.Predicate.{Const, Eql}\nimport grackle.Query.Filter\nimport grackle.QueryCompiler.{Elab, SelectElaborator}\nimport grackle.Value.StringValue\n\noverride val selectElaborator = SelectElaborator {\n  case (QueryType, \"country\", List(Binding(\"code\", StringValue(code)))) =>\n    Elab.transformChild(child =>\n      Unique(Filter(Eql(CountryType / \"code\", Const(code)), child)))\n}",
+      "explanation": "Canonical predicate wiring: match the field + its bound argument, then transformChild to wrap the child in Filter(Eql(path, Const(value))). `CountryType / \"code\"` builds a UniquePath term; Eql needs an Eq[String] (available from cats). Wrapping in Unique makes it a single-result lookup. Adapted verbatim from SqlWorldMapping.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Combine predicates: And / Not / Lt / In / Contains / IsNull / Like",
+      "code": "// AND of two negated less-thans (population >= min AND indepyear >= year)\nFilter(\n  And(\n    Not(Lt(CountryType / \"population\", Const(min))),\n    Not(Lt(CountryType / \"indepyear\", Const(Option(year))))\n  ),\n  child)\n\n// membership against a static list\nFilter(In(CityType / \"language\", languages), child)\n\n// list-field contains an element\nFilter(Contains(ItemType / \"tags\", Const(tag)), child)\n\n// null / not-null test over an Option field\nFilter(IsNull[Int](CountryType / \"indepyear\", isNull = !indep), child)\n\n// SQL-style wildcard match (case-insensitive); Like is in grackle.sql\nFilter(Like(CityType / \"name\", namePattern, true), child)",
+      "explanation": "Shows the full predicate vocabulary as used in real mappings. Note: Lt/GtEql require Order[T]; In/Eql/Contains require Eq[T]; IsNull operates on a Term[Option[T]] so the path must be an Option field; Like accepts either a Term[String] or Term[Option[String]] and lives in the sql-core module, not core. Lines are drawn from SqlWorldMapping.scala and PredicatesSuite.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Filter on an in-memory ValueMapping (no database) using Contains and a computed field",
+      "code": "import grackle.Predicate.{Const, Contains, Eql}\nimport grackle.Query.Filter\nimport grackle.QueryCompiler.{Elab, SelectElaborator}\nimport grackle.Value.{IDValue, IntValue}\n\noverride val selectElaborator = SelectElaborator {\n  case (QueryType, \"itemByTag\", List(Binding(\"tag\", IDValue(tag)))) =>\n    Elab.transformChild(child => Filter(Contains(ItemType / \"tags\", Const(tag)), child))\n  case (QueryType, \"itemByTagCount\", List(Binding(\"count\", IntValue(count)))) =>\n    Elab.transformChild(child => Filter(Eql(ItemType / \"tagCount\", Const(count)), child))\n}",
+      "explanation": "Proves predicates work without SQL: this is a ValueMapping[IO] over an in-memory List[Item]. Contains filters a list field (tags); Eql can filter on a CursorField-computed field (tagCount), because predicates run against the Cursor. Verbatim from PredicatesSuite.scala (ItemMapping). The whole suite runs with no DB.",
+      "needsDb": false
+    },
+    {
+      "title": "Filter + Order + Offset + Limit from optional GraphQL args",
+      "code": "import grackle.Predicate.{Const, Eql}\nimport grackle.Query.{Filter, Limit, Offset, OrderBy, OrderSelection, OrderSelections}\nimport grackle.Value.{AbsentValue, IntValue, NullValue}\n\ndef mkOffset(query: Query, v: Value): Result[Query] = v match {\n  case AbsentValue | NullValue => query.success\n  case IntValue(n) if n == 0 => query.success\n  case IntValue(n) if n > 0 => Offset(n, query).success\n  case other => Result.failure(s\"Expected offset >= 0, found $other\")\n}\n\ndef mkLimit(query: Query, v: Value): Result[Query] = v match {\n  case AbsentValue | NullValue => query.success\n  case IntValue(n) if n > 0 => Limit(n, query).success\n  case other => Result.failure(s\"Expected limit > 0, found $other\")\n}\n\ndef mkFilter(query: Query, tpe: Type, v: Value): Result[Query] = v match {\n  case AbsentValue | NullValue => query.success\n  case FilterValue(id) => Filter(Eql(tpe / \"id\", Const(id)), query).success\n  case _ => Result.failure(s\"Expected filter value, found $v\")\n}\n\n// inside the elaborator, compose with a for-comprehension over Result:\nElab.transformChild(child =>\n  for {\n    fc <- mkFilter(child, ElemAType, filter)\n    sc <- mkOrderBy(fc, order)(o => List(OrderSelection[Option[String]](ElemAType / \"elemA\", ascending = o.ascending)))\n    oc <- mkOffset(sc, offset)\n    lc <- mkLimit(oc, limit)\n  } yield lc)",
+      "explanation": "The reference pattern for argument-driven filtering/ordering/paging: each Option arg becomes a Result[Query] transformer, validation failures become Result.failure, and they are threaded inner-to-outer (filter, then order, then offset, then limit) inside transformChild's Result overload. OrderSelection is parameterized on the field's actual type (Option[String] here) and needs Order[T]. Verbatim structure from SqlFilterOrderOffsetLimitMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Build the whole stack with FilterOrderByOffsetLimit",
+      "code": "import grackle.Query.{FilterOrderByOffsetLimit, OrderSelection}\n\nFilterOrderByOffsetLimit(\n  pred   = None,\n  oss    = Some(List(OrderSelection(orderTerm, nullsLast = nullsHigh))),\n  offset = offset,   // Option[Int]\n  limit  = limit,    // Option[Int]\n  child  = child)",
+      "explanation": "Preferred constructor when you have Options: it nests Filter (innermost), OrderBy, Offset, then Limit (outermost) for you. `nullsHigh` is a backend-provided Boolean passed as nullsLast so null ordering matches the SQL dialect. Verbatim from SqlPaging1/2/3 mappings (PagingInfo.elabItems).",
+      "needsDb": true
+    },
+    {
+      "title": "Counted paging: items via FilterOrderByOffsetLimit, total via Count, offset/limit via CursorField",
+      "code": "// fieldMappings on the PagedCountry object:\nCursorField(\"offset\", CountryPaging.genOffset, Nil),\nCursorField(\"limit\",  CountryPaging.genLimit, Nil),\nSqlField(\"total\", root.numCountries),\nSqlObject(\"items\")\n\n// elaborator: stash paging info, then elaborate each sibling field\ncase (QueryType, \"countries\", List(Binding(\"offset\", IntValue(off)), Binding(\"limit\", IntValue(lim)))) =>\n  CountryPaging.setup(off, lim)              // Elab.env(key -> PagingInfo(off, lim))\ncase (PagedCountryType, \"items\", Nil) =>\n  CountryPaging.elabItems                     // FilterOrderByOffsetLimit(None, Some(order), off, lim, child)\ncase (PagedCountryType, \"total\", Nil) =>\n  CountryPaging.elabTotal                     // transformChild(_ => Count(Select(\"items\", Select(countAttr))))",
+      "explanation": "Shows how offset/limit/total are surfaced as fields. setup() stores PagingInfo in the Elab environment; the sibling `items` field reads it to build the paged sub-query, `total` replaces its child with a Count (compiled to SQL COUNT), and `offset`/`limit` echo the env values back via CursorField generators (genOffset/genLimit). Verbatim from SqlPaging1Mapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "\"Has more\" paging: overfetch by one, trim with TransformCursor",
+      "code": "def elabItems: Elab[Unit] =\n  Elab.transformChild { child =>\n    val lim0 = if (hasHasMore) limit.map(_ + 1) else limit   // overfetch one extra row\n    val items = FilterOrderByOffsetLimit(None, Some(List(OrderSelection(orderTerm, nullsLast = nullsHigh))), offset, lim0, child)\n    if (hasHasMore) TransformCursor(genItems, items) else items\n  }\n\ndef genItems(c: Cursor): Result[Cursor] =\n  for {\n    size  <- c.listSize\n    elems <- c.asList(Seq)\n  } yield if (limit.forall(size <= _)) c else ListTransformCursor(c, size - 1, elems.init)",
+      "explanation": "Cursor-based 'has more' paging without a Relay type: if the query selects hasMore AND items, fetch limit+1 rows, then strip the extra row in a TransformCursor so clients only see `limit` items while hasMore can be computed from whether the extra row existed. If only `hasMore` is selected it compiles to a COUNT instead. Verbatim from SqlPaging3Mapping.scala.",
+      "needsDb": true
+    }
+  ],
+  "gotchas": [
+    "Term covariance is intentionally avoided: the source comment on `trait Term[T]` says 'fun fact: making this covariant crashes Scala 3'. Do not try to make Term/Predicate covariant.",
+    "Eql/NEql/In/Contains require an implicit Eq[T]; Lt/LtEql/Gt/GtEql and OrderSelection require an implicit Order[T]. Forgetting the instance (or comparing the wrong static type) is a compile error. The element type must match the field's mapped type, including Option — e.g. OrderSelection[Option[String]] for a nullable string field, and IsNull[Int] over an Option[Int] field.",
+    "`Like` is NOT in the core predicate ADT — it lives in the sql-core module (grackle.sql.Like, with separate scala-2 and scala-3 source files) and is only meaningful against a SQL backend. Its first parameter is a union type `Term[String] | Term[Option[String]]` so it accepts both nullable and non-nullable string terms.",
+    "Path.asTerm silently picks ListPath vs UniquePath based on rootTpe.pathIsList(path). A scalar path used where a List term is expected (or vice versa) will compile via the path2Term/path2ListTerm implicits but fail at runtime: UniquePath.apply errors with 'Expected exactly one element for path ...' if the focus isn't a single ScalarFocus.",
+    "FilterOrderByOffsetLimit nests in a fixed order: Filter innermost, then OrderBy, then Offset, then Limit outermost. If you hand-nest the four Query nodes yourself in a different order, SQL compilation and the FilterOrderByOffsetLimit.unapply extractor may not recognize the pattern.",
+    "OrderSelection.nullsLast defaults to true, but SQL backends should pass `nullsLast = nullsHigh` (a per-dialect Boolean from SqlMapping) so null ordering matches the database; hardcoding true can produce results that differ between in-memory and SQL execution.",
+    "Argument validation lives in the elaborator, not the predicate. The example mappings reject offset < 0 and limit <= 0 with Result.failure inside mkOffset/mkLimit; an Offset(negative, ...) or Limit(0, ...) node is not validated by the Query ADT itself.",
+    "Counted/total paging needs a real backing count source. SqlPaging1 maps `total` to a column (root.numCountries) or compiles `Count(Select(\"items\", Select(countAttr)))` to a SQL COUNT; you cannot get an accurate total just from the (possibly limited) items list.",
+    "'Has more' paging overfetches limit+1 rows ONLY when both `hasMore` and `items` are selected (it checks Elab.hasField). If you compute hasMore differently you must replicate this conditional, and you must use TransformCursor/ListTransformCursor to hide the extra row from clients — otherwise the extra item leaks into the response.",
+    "Predicate.and/or smart constructors and And.combineAll fold lists into chains and short-circuit on True/False; an empty list yields True (for and / combineAll) or False (for or). Building And/Or directly from an empty list of leaves is on you to guard.",
+    "There is no built-in Relay connection type (no edges/node/pageInfo/endCursor/hasNextPage) anywhere in this repo. 'Cursor-based' paging here means hand-rolled over Offset/Limit/Count/TransformCursor plus the GraphQL Cursor type — not the Relay spec. Documentation should not imply a ready-made Relay connection helper exists."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/main/scala/predicate.scala",
+      "region": "lines 34-138 (Term, Path, PathTerm.UniquePath/ListPath) and 140-323 (Predicate object: True/False, and/or, Const, And/Or/Not, Eql/NEql, Contains, Lt/LtEql/Gt/GtEql, IsNull, In/In.fromEqls, AndB/OrB/XorB/NotB, Matches, StartsWith, ToUpperCase/ToLowerCase)",
+      "whatItShows": "The complete predicate/term ADT with exact constructor signatures and apply semantics. Ideal verbatim reference source."
+    },
+    {
+      "file": "modules/core/src/main/scala/query.scala",
+      "region": "Filter (110-112), Limit (188-190), Offset (195-197), OrderBy/OrderSelections/OrderSelection (203-249), Count (254-256), TransformCursor (261-263), object FilterOrderByOffsetLimit apply/unapply (486-521)",
+      "whatItShows": "Exact Query-node signatures for filtering/ordering/paging and the canonical FilterOrderByOffsetLimit assembler/destructurer."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/PredicatesSuite.scala",
+      "region": "ItemData + ItemMapping + PredicatesSuite (whole file, ~29-213)",
+      "whatItShows": "A complete, compiling, DB-free example: ValueMapping with Filter(Contains(...)) and Filter(Eql(... computed field ...)) plus passing assertions. Best snip for an in-memory filtering how-to."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlWorldMapping.scala",
+      "region": "selectElaborator (193-279)",
+      "whatItShows": "The richest single example of predicate usage: Eql, GtEql, Like, In, And/Not/Lt, IsNull, plus Limit/Offset/OrderBy/OrderSelection and Count all wired from GraphQL args via Elab.transformChild."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlFilterOrderOffsetLimitMapping.scala",
+      "region": "schema (45-70), mkOffset/mkLimit/mkFilter/mkOrderBy (141-176), selectElaborator (178-226)",
+      "whatItShows": "Reference pattern for optional filter/order/offset/limit args as Result[Query] transformers composed inner-to-outer, with validation. Good how-to snip."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlFilterOrderOffsetLimitSuite.scala",
+      "region": "whole file (28-1649)",
+      "whatItShows": "Exhaustive GraphQL query + expected-JSON pairs covering filter, order ASC/DESC, limit, offset on one/both sides and with aliases. Snip individual tests as worked examples."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlPaging1Mapping.scala",
+      "region": "PagingConfig/PagingInfo (130-160), selectElaborator (162-186)",
+      "whatItShows": "Counted paging (offset/limit/total/items) using Elab.env, FilterOrderByOffsetLimit, Count, and CursorField generators."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlPaging1Suite.scala",
+      "region": "whole file (28-729)",
+      "whatItShows": "End-to-end counted-paging behavior: initial/offset/final/over-the-end pages, nested paging, introspection, aliasing, only-bounds. Worked examples with expected JSON."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlPaging3Mapping.scala",
+      "region": "header comment (33-45) and PagingConfig/PagingInfo (135-201)",
+      "whatItShows": "Has-more paging: overfetch limit+1, trim with TransformCursor/ListTransformCursor, conditional Count via hasField/hasItems, hasMore computed from list size."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlPaging2Mapping.scala",
+      "region": "PagingConfig/PagingInfo (120-156)",
+      "whatItShows": "A simpler has-more variant that always computes hasMore from a Count attribute (num > offset+limit), good contrast to SqlPaging3's overfetch approach."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlLikeMapping.scala",
+      "region": "mkPredicate (94-98) and selectElaborator (100-126)",
+      "whatItShows": "Like + IsNull over nullable and non-nullable string fields, including the None->IsNull / Some->Like mapping for absent vs present patterns."
+    },
+    {
+      "file": "modules/sql-core/src/main/scala-3/Like.scala",
+      "region": "whole file (22-42)",
+      "whatItShows": "Exact Like predicate definition with the union-typed term param and the %/_ -> regex translation (likeToRegex)."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Predicate and Term reference",
+      "diataxisType": "reference",
+      "outline": [
+        "Term[T]: reified Cursor => Result[T], introspection API (children/fold/exists/forall/forallR)",
+        "Path and the Type / \"field\" syntax; UniquePath vs ListPath and how asTerm chooses",
+        "Const literals",
+        "Predicate ADT table: True/False, And/Or/Not (+ and/or/combineAll smart constructors), Eql/NEql, Lt/LtEql/Gt/GtEql, In (+ fromEqls), Contains, IsNull, Matches, StartsWith",
+        "Non-boolean term transformers: AndB/OrB/XorB/NotB, ToUpperCase/ToLowerCase",
+        "Like (sql-core module): wildcards, case sensitivity, nullable-term union type",
+        "Required typeclasses: Eq[T] vs Order[T] per predicate"
+      ]
+    },
+    {
+      "title": "Query nodes for filtering, ordering and paging",
+      "diataxisType": "reference",
+      "outline": [
+        "Filter(pred, child)",
+        "OrderBy / OrderSelections / OrderSelection (ascending, nullsLast, Order[T] requirement)",
+        "Offset(num) and Limit(num)",
+        "Count(child)",
+        "TransformCursor(f, child)",
+        "FilterOrderByOffsetLimit constructor/extractor and its fixed nesting order"
+      ]
+    },
+    {
+      "title": "How to filter, sort and page a field from GraphQL arguments",
+      "diataxisType": "how-to",
+      "outline": [
+        "Match field + Bindings in a SelectElaborator",
+        "Wrap the child with Elab.transformChild (Query / Result[Query] / Elab[Query] overloads)",
+        "Build a single-result lookup with Unique(Filter(Eql(...)))",
+        "Compose optional filter/order/offset/limit as Result[Query] transformers (mkFilter/mkOrderBy/mkOffset/mkLimit) and thread them inner-to-outer",
+        "Validate arguments (reject offset<0, limit<=0) with Result.failure",
+        "Use FilterOrderByOffsetLimit when you have Options"
+      ]
+    },
+    {
+      "title": "How to implement paged results (offset/limit, total, hasMore)",
+      "diataxisType": "how-to",
+      "outline": [
+        "Model a Paged<X> object type with offset/limit/total (or hasMore) and items",
+        "Stash paging state with Elab.env and read it from sibling fields with envE",
+        "Counted style: items via FilterOrderByOffsetLimit, total via Count, offset/limit via CursorField",
+        "Has-more style: overfetch limit+1, trim with TransformCursor + ListTransformCursor, gate on Elab.hasField",
+        "Nested paging",
+        "Note: this is hand-rolled cursor paging, not a Relay connection"
+      ]
+    },
+    {
+      "title": "How predicates are evaluated vs compiled",
+      "diataxisType": "explanation",
+      "outline": [
+        "Why Term is a reified function and not Cursor => Boolean (interpreter introspection)",
+        "In-memory evaluation: predicates run against the Cursor (ValueMapping example)",
+        "SQL compilation: predicates and order/limit/offset become WHERE/ORDER BY/LIMIT/OFFSET; Count becomes SQL COUNT",
+        "nullsHigh / nullsLast and dialect-specific null ordering",
+        "Where validation belongs (elaborator) vs what the ADT guarantees"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1483 @@
+{
+  "informationArchitecture": [
+    {
+      "section": "Getting Started",
+      "purpose": "Orient a newcomer: what Grackle is, how to add it, and a 5-minute first query. Landing + low-commitment on-ramp before the deep tutorials.",
+      "pages": [
+        "docs/index.md (existing landing, lightly revised)",
+        "docs/getting-started/overview.md",
+        "docs/getting-started/install.md",
+        "docs/getting-started/quick-start.md"
+      ]
+    },
+    {
+      "section": "Tutorials",
+      "purpose": "Learning-oriented, read-start-to-finish builds. Each produces a working endpoint. Reuses the demo StarWars (generic) and World (SQL) mappings already snip-tagged.",
+      "pages": [
+        "docs/tutorial/intro.md (existing, fixed)",
+        "docs/tutorial/in-memory-model.md (existing, kept)",
+        "docs/tutorial/db-backed-model.md (existing, kept)",
+        "docs/tutorial/mutations-subscriptions.md"
+      ]
+    },
+    {
+      "section": "How-to guides",
+      "purpose": "Task-oriented recipes for a reader who already knows the basics and has a specific goal (filter, compose, pick a backend, handle effects/errors).",
+      "pages": [
+        "docs/how-to/filtering-ordering-paging.md",
+        "docs/how-to/compose-mappings.md",
+        "docs/how-to/sql-backends.md",
+        "docs/how-to/interfaces-unions.md",
+        "docs/how-to/jsonb-columns.md",
+        "docs/how-to/custom-scalars-enums.md",
+        "docs/how-to/schema-directives.md",
+        "docs/how-to/query-directives.md",
+        "docs/how-to/effects-batching.md",
+        "docs/how-to/errors.md",
+        "docs/how-to/validate-mappings.md",
+        "docs/how-to/generic-derivation.md",
+        "docs/how-to/circe-backend.md",
+        "docs/how-to/serve-over-http.md"
+      ]
+    },
+    {
+      "section": "Concepts",
+      "purpose": "Understanding-oriented explanations of the architecture and the load-bearing ideas, so the reference pages have somewhere to point for 'why'.",
+      "pages": [
+        "docs/concepts/architecture.md",
+        "docs/concepts/compiler-elaboration.md",
+        "docs/concepts/mappings-cursors.md",
+        "docs/concepts/query-interpreter.md",
+        "docs/concepts/schema-model.md",
+        "docs/concepts/nullability-lists.md",
+        "docs/concepts/effects-batching.md",
+        "docs/concepts/composition.md",
+        "docs/concepts/introspection-fragments-variables.md"
+      ]
+    },
+    {
+      "section": "Reference",
+      "purpose": "Information-oriented, exhaustive lookup of every public type, signature, and rule. Terse, table-heavy, generated mostly by snipping signatures from main sources.",
+      "pages": [
+        "docs/reference/schema-sdl.md",
+        "docs/reference/mapping-types.md",
+        "docs/reference/query-algebra.md",
+        "docs/reference/predicates.md",
+        "docs/reference/filtering-paging-nodes.md",
+        "docs/reference/cursor.md",
+        "docs/reference/context-env.md",
+        "docs/reference/result-problem.md",
+        "docs/reference/elab-phases.md",
+        "docs/reference/sql-mapping.md",
+        "docs/reference/circe-mapping.md",
+        "docs/reference/generic-derivation.md",
+        "docs/reference/effects.md",
+        "docs/reference/running-operations.md"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "path": "docs/index.md",
+      "title": "Grackle",
+      "diataxisType": "landing",
+      "purpose": "Existing landing page. Keep the header/overview/community blocks; retarget the 'Getting Started' bullets at the new Getting Started section and tutorials.",
+      "audience": "All visitors",
+      "outline": [
+        "Header (mdoc:passthrough Output.header — unchanged)",
+        "Overview (unchanged prose)",
+        "Getting Started: link to Getting Started/Overview, Install, Quick-start, Tutorials",
+        "Running DB tests (unchanged)",
+        "Community / Talks / Contributing (unchanged)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Header banner via Output.header('@headerVariant@') — already in place",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/getting-started/overview.md",
+      "title": "What is Grackle?",
+      "diataxisType": "explanation",
+      "purpose": "One-screen orientation: GraphQL server on the Typelevel stack; compiler/interpreter model; mappings tie a schema to any backend (in-memory, generic, circe JSON, SQL). Sets vocabulary and points to the right next page per backend.",
+      "audience": "Newcomers deciding whether/how to adopt Grackle",
+      "outline": [
+        "Grackle in one paragraph (compiler -> query algebra -> interpreter)",
+        "The central idea: a Mapping ties a Schema to data",
+        "The backend menu: ValueMapping, GenericMapping, CirceMapping, SqlMapping (when to use each)",
+        "Effects & F[_]: built on cats-effect/fs2; F needs MonadThrow",
+        "Where to go next (Install -> Quick-start -> Tutorials/How-to)"
+      ],
+      "examples": [
+        {
+          "kind": "diagram",
+          "description": "ASCII/Mermaid flow: GraphQL text -> QueryCompiler (parse, validate, elaborate) -> Query algebra -> QueryInterpreter + Mapping/Cursor -> JSON response",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/getting-started/install.md",
+      "title": "Installation",
+      "diataxisType": "how-to",
+      "purpose": "Authoritative dependency matrix and Scala/platform support, lifted from the current index 'To add Grackle' block so it lives in the right section.",
+      "audience": "Anyone setting up a build",
+      "outline": [
+        "Core dependency (grackle-core)",
+        "Optional backends: circe, generic, doobie-pg, skunk, doobie-oracle, doobie-mssql",
+        "Scala 2.13/3.3+, Scala.js, Scala Native support notes",
+        "Cross-build/platform caveats (SQL backends JVM-only)",
+        "Imports you'll usually need (grackle._, grackle.syntax._)"
+      ],
+      "examples": [
+        {
+          "kind": "mdoc-inline",
+          "description": "build.sbt libraryDependencies block with @VERSION@ (plain scala fenced block, not compiled — mirrors current index.md)",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/getting-started/quick-start.md",
+      "title": "Quick start: your first query",
+      "diataxisType": "tutorial",
+      "purpose": "Smallest possible end-to-end: define a tiny schema, a ValueMapping over a Scala List, a one-case selectElaborator, and run compileAndRun — all in-memory, no DB, copy-pasteable and compiled by mdoc.",
+      "audience": "First-time users who want something running in minutes",
+      "outline": [
+        "Add grackle-core and the imports",
+        "Define a 2-type schema with schema\"...\"",
+        "Model data as a case class + List",
+        "ValueObjectMapping + ValueField for each field",
+        "A single selectElaborator case turning an arg into Unique(Filter(Eql(...)))",
+        "Run it with compileAndRun and read the JSON",
+        "Next steps: full StarWars tutorial / backends"
+      ],
+      "examples": [
+        {
+          "kind": "snip-new",
+          "description": "Complete minimal CurrencyMapping-style ValueMapping (schema, refs, typeMappings, selectElaborator) compiled in the docs module",
+          "sourceFileAndRegion": "modules/docs/src/main/scala/grackle/QuickStartMapping.scala #quickstart",
+          "needsDb": false
+        },
+        {
+          "kind": "mdoc-inline",
+          "description": "Run a query: compileAndRun(...).unsafeRunSync() rendering the JSON envelope",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/tutorial/intro.md",
+      "title": "Introduction",
+      "diataxisType": "landing",
+      "purpose": "Existing 6-line stub. Fix the broken link (second bullet currently points at in-memory-model.md instead of db-backed-model.md) and add the new mutations/subscriptions tutorial to the list.",
+      "audience": "Tutorial readers",
+      "outline": [
+        "Intro sentence (kept)",
+        "Links: In-memory model; DB-backed model (FIX broken link); Mutations & Subscriptions (new)"
+      ],
+      "examples": [],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/tutorial/in-memory-model.md",
+      "title": "In-memory Model",
+      "diataxisType": "tutorial",
+      "purpose": "Existing Star Wars tutorial. Keep as-is; it already snips #schema/#model_types/#model_values/#elaborator/#root/#service/#server from the demo. Add cross-links to the new generic-derivation how-to and the concepts pages, and replace the long hand-written query-algebra block with a snip from the query.scala source where practical.",
+      "audience": "Beginners",
+      "outline": [
+        "Running the demo (kept)",
+        "Query examples (kept)",
+        "The Schema (#schema snip, kept)",
+        "The Scala model (#model_types/#model_values, kept)",
+        "Compiler & elaborator (#elaborator, kept; add concept cross-links)",
+        "Interpreter & cursor (#root, kept)",
+        "The service (#service, kept)",
+        "Putting it together (#server, kept)",
+        "NEW: 'How this uses generic derivation' aside linking to how-to/generic-derivation"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "All existing demo snips retained (#schema,#model_types,#model_values,#elaborator,#root,#service,#server)",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala #schema|#model_types|#model_values|#elaborator|#root",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/tutorial/db-backed-model.md",
+      "title": "DB-backed Model",
+      "diataxisType": "tutorial",
+      "purpose": "Existing World/Postgres tutorial. Keep as-is (snips #schema/#db_tables/#root/#type_mappings/#elaborator/#main/#server). Add cross-links to how-to/sql-backends, how-to/filtering-ordering-paging, and reference/sql-mapping.",
+      "audience": "Beginners moving to a real database",
+      "outline": [
+        "Intro & running the demo (kept)",
+        "Schema (#schema snip)",
+        "DB tables / TableDef (#db_tables snip)",
+        "Root & type mappings (#root, #type_mappings snips)",
+        "Elaborator with Filter/Order/Limit (#elaborator snip)",
+        "Run on http4s (#main, #server snips)",
+        "NEW: cross-links to SQL how-to/reference pages"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "All existing World demo snips retained",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/world/WorldMapping.scala #schema|#db_tables|#root|#type_mappings|#elaborator",
+          "needsDb": true
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/tutorial/mutations-subscriptions.md",
+      "title": "Mutations & Subscriptions",
+      "diataxisType": "tutorial",
+      "purpose": "Third tutorial: extend the model with a Mutation and a Subscription using RootEffect/RootStream over an in-memory SignallingRef, so it compiles and runs with no DB. Bridges to the SQL mutation how-to.",
+      "audience": "Readers who finished the in-memory tutorial",
+      "outline": [
+        "Mutations are just RootEffect fields on the Mutation type (no separate API)",
+        "Add Mutation { put(n: Int): Int! } and capture args with Elab.env",
+        "Implement with RootEffect.computeCursor reading env + writing a Ref",
+        "Subscriptions are RootStream fields; add Subscription { watch: Int! } over ref.discrete",
+        "Run a mutation with compileAndRun; run a subscription with compileAndRunSubscription",
+        "Serial execution of mutation roots; the exactly-one-result rule for compileAndRun",
+        "Where to next: SQL mutations (how-to), effects & batching (how-to/concepts), Postgres LISTEN/NOTIFY subscriptions"
+      ],
+      "examples": [
+        {
+          "kind": "snip-new",
+          "description": "Self-contained ValueMapping with get/put/watch (Query/Mutation/Subscription) built on a SignallingRef, compiled in the docs module; mirrors SubscriptionSuite.mapping",
+          "sourceFileAndRegion": "modules/docs/src/main/scala/grackle/MutationSubscriptionMapping.scala #ms_mapping",
+          "needsDb": false
+        },
+        {
+          "kind": "mdoc-inline",
+          "description": "Drive it: run a put mutation then take(n) from the watch subscription stream and show the JSON responses",
+          "needsDb": false
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/filtering-ordering-paging.md",
+      "title": "Filter, sort and page a field",
+      "diataxisType": "how-to",
+      "purpose": "Recipe-driven guide to wiring GraphQL arguments to Filter/OrderBy/Offset/Limit/Count, including the optional-arg-as-Result[Query] pattern, FilterOrderByOffsetLimit, and the three hand-rolled paging styles (offset/limit, counted total, has-more). Explicitly notes there is no built-in Relay connection type.",
+      "audience": "Developers exposing list endpoints",
+      "outline": [
+        "Match field + Bindings in a SelectElaborator",
+        "Single-result lookup: Unique(Filter(Eql(Type / 'id', Const(id))))",
+        "Compose optional args as Result[Query] transformers threaded inner-to-outer (mkFilter/mkOrderBy/mkOffset/mkLimit)",
+        "Validate args (reject offset<0, limit<=0)",
+        "Build the stack with FilterOrderByOffsetLimit (fixed nesting order; nullsLast/nullsHigh)",
+        "Counted paging: items via FilterOrderByOffsetLimit, total via Count, offset/limit via CursorField, state via Elab.env",
+        "Has-more paging: overfetch limit+1, trim with TransformCursor + ListTransformCursor, gate on Elab.hasField",
+        "Caveat: no Relay edges/pageInfo helper — this is hand-rolled"
+      ],
+      "examples": [
+        {
+          "kind": "snip-new",
+          "description": "In-memory filtering with Contains and a computed-field Eql (DB-free), from a compiled docs ItemMapping mirroring PredicatesSuite",
+          "sourceFileAndRegion": "modules/docs/src/main/scala/grackle/FilterMapping.scala #filter",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Optional filter/order/offset/limit as Result[Query] transformers (snip-tag SqlFilterOrderOffsetLimitMapping mkOffset/mkLimit/mkFilter + elaborator)",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlFilterOrderOffsetLimitMapping.scala #fool_mk / #fool_elab",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Counted paging (offset/limit/total/items) PagingInfo + elaborator",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlPaging1Mapping.scala #paging1",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Has-more paging: overfetch + TransformCursor trim",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlPaging3Mapping.scala #paging3",
+          "needsDb": true
+        }
+      ],
+      "priority": "P0",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/compose-mappings.md",
+      "title": "Compose multiple mappings (federation)",
+      "diataxisType": "how-to",
+      "purpose": "How to stitch independent mappings behind one schema with ComposedMapping + Delegate + a join, including list joins (Group), TrivialJoin, and batching via combineAndRun. Covers both the all-in-memory case and the SQL-world + in-memory-currencies case.",
+      "audience": "Developers combining backends or services",
+      "outline": [
+        "Define the composed schema as a superset adding the join field",
+        "Subclass ComposedMapping; add Delegate field mappings",
+        "Re-declare selectElaborator for root args at the composed level",
+        "Write the join: pattern-match parent focus + child Select, emit the other mapping's query",
+        "List-valued join: return a Group of Selects (one per id)",
+        "TrivialJoin when the key is already in the parent context",
+        "Batch delegated subqueries by overriding combineAndRun",
+        "How it executes: Component node, deferral, completeAll staging (link to concepts/composition)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Country/Currency value-mapping composition + countryCurrencyJoin",
+          "sourceFileAndRegion": "modules/core/src/test/scala/composed/ComposedData.scala #composed_currency / #composed_country / #composed_mapping",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "List join via Group (collectionItemJoin)",
+          "sourceFileAndRegion": "modules/core/src/test/scala/composed/ComposedListSuite.scala #composed_list_join",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "SQL world + in-memory currencies composition with combineAndRun batching override",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlComposedWorldMapping.scala #composed_sql / #composed_combine",
+          "needsDb": true
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/sql-backends.md",
+      "title": "Choose and configure a SQL backend",
+      "diataxisType": "how-to",
+      "purpose": "Practical guide to picking Doobie vs Skunk and Postgres/Oracle/SQL Server, the col/codec differences, and wiring a mapping to a transactor/session pool. Models relationships (joins, embedding, composite keys, associative tables).",
+      "audience": "Developers building DB-backed mappings",
+      "outline": [
+        "Backend matrix: doobie-pg/oracle/mssql vs skunk; JVM-only note",
+        "Doobie col(name, Meta[T], nullable) vs Skunk col(name, Codec[T]) (Option-inferred)",
+        "Wiring: DoobieMapping over a Transactor / SkunkMapping over a Resource[F,Session]",
+        "One-to-many join (Country.cities) and many-to-one (City.country)",
+        "Embedding a value object on the parent row (Film.synopses)",
+        "PrefixedMapping for a shared embedded type across parents",
+        "Composite-key joins; chained joins through an associative table",
+        "Keys/hidden/associative flags and why join columns are hidden",
+        "Validation rules you'll hit (same-table, at-least-one-key)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "World mapping: joins + hidden keys + associative key",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlWorldMapping.scala #world_typemappings",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Embedding + PrefixedMapping",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlEmbeddingMapping.scala #embedding",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Composite-key join",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlCompositeKeyMapping.scala #composite_key",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Doobie vs Skunk col/codec definitions side by side",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/world/WorldMapping.scala #db_tables",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/interfaces-unions.md",
+      "title": "Map interfaces and unions to SQL",
+      "diataxisType": "how-to",
+      "purpose": "Single-table interface/union mapping with an SqlDiscriminator, subtype ObjectMappings, narrowPredicate/discriminate, the union hidden-fields rules, and querying with inline fragments + __typename.",
+      "audience": "Developers with polymorphic GraphQL types over relational data",
+      "outline": [
+        "Single-table interface mapping with a discriminator column (SqlInterfaceMapping)",
+        "Writing an SqlDiscriminator (discriminate + narrowPredicate)",
+        "Subtype ObjectMappings adding extra columns on the shared table",
+        "Union mapping rules: hidden key + hidden discriminator, per-member columns",
+        "Querying with ... on T and __typename",
+        "Validation errors to expect (split tables, missing/polymorphic discriminator, non-hidden union fields)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Interface mapping + entityTypeDiscriminator",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlInterfacesMapping.scala #interfaces / #discriminator",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Union mapping + itemTypeDiscriminator",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlUnionsMapping.scala #unions",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Inline-fragment + __typename query and expected JSON",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlUnionSuite.scala #union_query",
+          "needsDb": true
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/jsonb-columns.md",
+      "title": "Map a jsonb column with SqlJson",
+      "diataxisType": "how-to",
+      "purpose": "How to serve a GraphQL object/interface subtree from a jsonb column navigated in-process, including nested objects/enums/arrays/fragments, nullable vs non-null, and the limitation that you cannot join/filter/order inside the JSON.",
+      "audience": "Developers with semi-structured columns",
+      "outline": [
+        "Declare a jsonb column codec (doobie vs skunk)",
+        "Map it with SqlJson to a GraphQL object",
+        "Nested objects, enums, arrays inside the JSON",
+        "Interface members and __typename inside JSON",
+        "Nullable vs non-null SqlJson and the 'expected jsonb value' error",
+        "Limitations: no SQL joins/filters/ordering inside the sub-tree",
+        "Cross-backend: CursorFieldJson to decode a non-jsonb column into JSON"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "records TableDef + RowType ObjectMapping with SqlJson",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlJsonbMapping.scala #jsonb",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "jsonb descent queries (objects/arrays/fragments) + expected JSON",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlJsonbSuite.scala #jsonb_query",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "CursorFieldJson decoding a column into JSON in a SQL mapping",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlCursorJsonMapping.scala #cursor_json",
+          "needsDb": true
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": true
+    },
+    {
+      "path": "docs/how-to/custom-scalars-enums.md",
+      "title": "Define custom scalars and enums",
+      "diataxisType": "how-to",
+      "purpose": "Declare scalar/enum in SDL, understand the schema only records the name, wire encoding/decoding with LeafMapping + Value extractors (or a circe Encoder via deriveLeafCursorBuilder in the generic backend), use @specifiedBy.",
+      "audience": "Developers with domain scalars (UUID, dates, money)",
+      "outline": [
+        "Declare scalar Name / enum Name { ... } in SDL",
+        "Why the schema only records the name (separation from encoding)",
+        "Wire a scalar with LeafMapping[T] + an implicit circe Encoder[T]",
+        "Value extractors for custom-scalar arguments in elaborators",
+        "@specifiedBy and ScalarType.specifiedByURL",
+        "Generic backend variant: deriveLeafCursorBuilder bound to the schema scalar; java.time/UUID via the implicit Encoder leaf builder",
+        "Mapping enum value names to a domain ADT"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "ScalarsSuite MovieMapping: custom scalars/enum schema + LeafMapping list + Value extractors",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/ScalarsSuite.scala #scalars_schema / #scalars_leafmappings / #scalars_values",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Generic deriveLeafCursorBuilder[Genre] + java.time/UUID fields",
+          "sourceFileAndRegion": "modules/generic/src/test/scala/ScalarsSuite.scala #generic_scalars",
+          "needsDb": false
+        },
+        {
+          "kind": "mdoc-inline",
+          "description": "@specifiedBy on a scalar, parsed via Schema(text) and read with ScalarType.specifiedByURL",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/schema-directives.md",
+      "title": "Define and use schema directives",
+      "diataxisType": "how-to",
+      "purpose": "Declare directives in SDL, apply them to types/fields/enum values, read applied Directive values off the model, and use the built-ins (@skip/@include/@deprecated/@specifiedBy/@oneOf) and their accessors.",
+      "audience": "Developers adding schema metadata",
+      "outline": [
+        "Declare directive @name(args) [repeatable] on LOCATIONS",
+        "The full DirectiveLocation set",
+        "Apply to fields/types/enum values",
+        "Read applied Directive values (type.directives, fieldInfo.directives)",
+        "Built-ins and accessors: isDeprecated/deprecationReason, specifiedByURL, isOneOf",
+        "How locations/repeatability/argument types are validated"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "@authenticated/@hasRole declarations + reading them off the model",
+          "sourceFileAndRegion": "modules/core/src/test/scala/directives/SchemaDirectivesSuite.scala #schema_directives",
+          "needsDb": false
+        },
+        {
+          "kind": "mdoc-inline",
+          "description": "Read fieldInfo('email').directives from a schema\"...\" with @hasRole",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/query-directives.md",
+      "title": "Write a custom query directive",
+      "diataxisType": "how-to",
+      "purpose": "End-to-end recipe: declare a directive in SDL (required for validation), write a QueryCompiler.Phase that matches UntypedSelect nodes carrying it, and prepend it to compilerPhases. Worked @upperCase example.",
+      "audience": "Advanced users customizing query behaviour",
+      "outline": [
+        "Step 1: declare the directive in SDL with the correct on LOCATION",
+        "Step 2: write a Phase overriding transform to match the directive on UntypedSelect",
+        "Step 3: prepend the phase in compilerPhases (ordering vs VariablesSkipAndFragmentElaborator)",
+        "Use Elab.context/forField, TransformCursor/FieldTransformCursor to alter results",
+        "Fail vs warn (Elab.failure vs Elab.warning) and the resulting response shape",
+        "Note: @skip/@include are handled automatically and stripped before custom phases"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "QueryDirectivesMapping: @upperCase SDL + upperCaseElaborator Phase + compilerPhases override",
+          "sourceFileAndRegion": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala #upper_mapping / #upper_phase",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Query showing Warning (errors + data) when @upperCase is applied to a non-String field",
+          "sourceFileAndRegion": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala #upper_query",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/effects-batching.md",
+      "title": "Run effects and batch nested fields",
+      "diataxisType": "how-to",
+      "purpose": "Both effect attachment points: RootEffect (computeUnit/computeCursor/computeChild/computeJson/computeEncodable) for roots, and EffectField + EffectHandler for nested batched fields that avoid N+1. Explains the single-handler-instance batching rule and ordering contract.",
+      "audience": "Developers integrating external services / avoiding N+1",
+      "outline": [
+        "Root effects: pick the factory (computeUnit/computeCursor/computeChild; circe computeJson/computeEncodable)",
+        "Pass effect results downstream via the returned Cursor's Env",
+        "Nested batched effect: declare EffectField with required parent columns",
+        "Implement EffectHandler.runEffects: read parent data, ONE service/DB call for the batch",
+        "Build one continuation Cursor per input pair (Query.childContext + CirceCursor)",
+        "Ordering & batching rules: same handler instance, one Cursor per input in order",
+        "Re-querying the same mapping (runGrouped + sqlCursor + partition) pattern",
+        "Verify batching with a call counter; wire to doobie/skunk + an injected service"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Root effects: computeCursor/computeJson/computeEncodable side by side",
+          "sourceFileAndRegion": "modules/circe/src/test/scala/CirceEffectData.scala #circe_effects",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Batched nested handler over a CurrencyService (avoids N+1)",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlNestedEffectsMapping.scala #currency_handler / #effect_typemappings",
+          "needsDb": true
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Doubly-nested same-mapping re-query handler (runGrouped)",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlNestedEffectsMapping.scala #country_handler",
+          "needsDb": true
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/errors.md",
+      "title": "Construct, accumulate and report errors",
+      "diataxisType": "how-to",
+      "purpose": "Practical Result/Problem usage: client errors vs partial-data warnings vs internal bugs, accumulating multiple errors with parMapN/traverse, lifting Options/Eithers/effects, and attaching locations/paths to Problems.",
+      "audience": "All developers writing resolvers/elaborators",
+      "outline": [
+        "Return a client error (Result.failure / Problem with path)",
+        "Return partial data with a warning (Result.warning / Elab.warning) — data + errors",
+        "Signal an internal bug (Result.internalError / catchNonFatal) and how it propagates to F",
+        "Accumulate multiple errors with parMapN/traverse/combineAllWithDefault (vs short-circuit)",
+        "Lift Option/Either/effects (toResult, fromOption, fromEither, ResultT.liftF)",
+        "Attach locations/path/extensions to a Problem",
+        "How each maps to the response (link to reference/result-problem)"
+      ],
+      "examples": [
+        {
+          "kind": "mdoc-inline",
+          "description": "Construct the four Result cases + a for-comprehension that accumulates a warning",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Field-level Warning surfaces as both data and errors",
+          "sourceFileAndRegion": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala #upper_query",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/validate-mappings.md",
+      "title": "Validate a mapping and read the failures",
+      "diataxisType": "how-to",
+      "purpose": "How mapping validation works (checked vs unchecked TypeMappings, lazy validation on first compile), the full ValidationFailure catalog, and how to read/threshold by Severity.",
+      "audience": "Developers debugging mapping setup",
+      "outline": [
+        "validate / unsafeValidate / validateInto and Severity",
+        "Checked vs unchecked TypeMappings; validation runs lazily on first compiler force",
+        "The ValidationFailure catalog (MissingTypeMapping, AmbiguousTypeMappings, MissingFieldMapping, DeclaredFieldMappingIsHidden, ObjectTypeExpected, LeafTypeExpected, ReferencedTypeDoesNotExist, UnusedTypeMapping, UnusedFieldMapping)",
+        "Worked examples triggering each",
+        "SQL-specific consistency rules (cross-link to reference/sql-mapping)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "MappingValidatorSuite: unchecked TypeMappings + each ValidationFailure triggered/matched",
+          "sourceFileAndRegion": "modules/core/src/test/scala/mapping/MappingValidatorSuite.scala #validator",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/generic-derivation.md",
+      "title": "Serve Scala ADTs with generic derivation",
+      "diataxisType": "how-to",
+      "purpose": "Use deriveObjectCursorBuilder/deriveInterfaceCursorBuilder + GenericField to serve case classes / sealed traits without per-field mappings; customise with renameField/transformField; handle recursion and custom scalars; effectful roots with genericCursor.",
+      "audience": "Developers whose model ADT matches the schema",
+      "outline": [
+        "The CursorBuilder[T] typeclass and provided implicit builders (note Long->Int, Double/Float->Float, Encoder leaf->String)",
+        "Derive product (object) and coproduct (interface/union) builders; the explicit GraphQL Type",
+        "No annotations: field names are structural; rename with renameField/transformFieldNames",
+        "transformField to resolve id lists to nested objects (and the U => CursorBuilder requirement)",
+        "Mutually recursive / graph-shaped data via id fields + resolvers (by-name implicits)",
+        "Custom scalars via deriveLeafCursorBuilder + Encoder; java.time/UUID via the implicit leaf",
+        "Wire data with GenericField; effectful roots via RootEffect.computeCursor + genericCursor",
+        "Scala 2 vs 3 derivation backends share the same public API"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "StarWars demo generic mapping: interface + object derivation + transformField + GenericField (reuse demo source)",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala #model_types / #root",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Mutually recursive Programme/Production via transformField",
+          "sourceFileAndRegion": "modules/generic/src/test/scala/RecursionSuite.scala #recursion_data / #recursion_mapping",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/circe-backend.md",
+      "title": "Serve GraphQL from circe JSON",
+      "diataxisType": "how-to",
+      "purpose": "Build a CirceMapping over in-memory Json: CirceField for a constant subtree, CursorFieldJson for a computed subtree, LeafMapping for custom scalars, effectful JSON roots, and the opaque-subtree priority rule.",
+      "audience": "Developers with static/REST JSON data",
+      "outline": [
+        "When to choose circe (fixtures, static data, JSON from REST, no DB)",
+        "Define the schema and a Json value (json\"...\")",
+        "Map a field with CirceField (constant subtree)",
+        "Map custom scalars with LeafMapping[T]",
+        "Compute a field from JSON with CursorField/CursorFieldJson + required",
+        "Run queries; effectful roots with computeJson/computeEncodable",
+        "Opaque-subtree priority: JSON value beats an explicit mapping (worked example)",
+        "Splice JSON into a SQL mapping via CursorFieldJson (cross-link)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "TestCirceMapping: schema + constant CirceField('root', data) + LeafMapping + CursorField",
+          "sourceFileAndRegion": "modules/circe/src/test/scala/CirceData.scala #circe_mapping",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "CircePriorityMapping demonstrating opaque-subtree priority",
+          "sourceFileAndRegion": "modules/circe/src/test/scala/CircePrioritySuite.scala #circe_priority",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/how-to/serve-over-http.md",
+      "title": "Serve a mapping over HTTP",
+      "diataxisType": "how-to",
+      "purpose": "Wire a Mapping to http4s GET/POST routes (query/operationName/variables), build the Ember server, set introspectionLevel, and understand that internal errors become 500s while validation errors are 200+errors. Notes there is no built-in websocket transport for subscriptions.",
+      "audience": "Developers deploying a Grackle endpoint",
+      "outline": [
+        "Goal: expose Mapping[F] as a GraphQL-over-HTTP endpoint",
+        "Build GET + POST routes (mkRoutes) reading query/operationName/variables",
+        "Variables decoding for GET (QueryParamDecoder[Json]) and BadRequest handling",
+        "Build the Ember server (mkServer): Playground assets, Logger, ErrorHandling",
+        "Wire multiple mappings under prefixes, combine with <+> in an IOApp",
+        "Required deps (http4s-ember-server/circe/dsl)",
+        "introspectionLevel for production (Full needed by Playground/GraphiQL)",
+        "Internal errors -> 500 vs validation errors -> 200+errors",
+        "Subscriptions: only the Stream API; no built-in graphql-ws transport (you bridge it)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Demo http4s routes (GET+POST)",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/GraphQLService.scala #service",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Demo Ember server + IOApp wiring",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/DemoServer.scala #server",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Main IOApp combining routes with <+>",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/Main.scala #main",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/architecture.md",
+      "title": "Architecture overview",
+      "diataxisType": "explanation",
+      "purpose": "The big picture: compiler -> query algebra -> interpreter, and how Mapping/Schema/Cursor/Result fit together. The hub page the rest of Concepts hangs off.",
+      "audience": "Anyone wanting the mental model",
+      "outline": [
+        "The three layers: parse/compile, the query algebra, interpret",
+        "A Mapping bundles Schema + typeMappings + selectElaborator -> compiler + interpreter",
+        "Cursors navigate the backing data; Result accumulates errors",
+        "Backends override mkCursorForMappedField; staging via completeAll",
+        "Pointers into each deeper concept page"
+      ],
+      "examples": [
+        {
+          "kind": "diagram",
+          "description": "Layered architecture diagram: text -> QueryCompiler(phases) -> Operation(Query algebra) -> QueryInterpreter(+Mapping/Cursor) -> ProtoJson -> Json; with the Result error channel alongside",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/compiler-elaboration.md",
+      "title": "The compiler and elaboration",
+      "diataxisType": "explanation",
+      "purpose": "How a query string becomes an executable Operation: parse -> validate -> phases (auto-prepended IntrospectionElaborator/Variables.../MergeFields then user phases), the Elab monad, transformChild/env/addAttribute, and why order matters.",
+      "audience": "Developers writing elaborators/phases",
+      "outline": [
+        "The three stages (parse, validate, elaborate) and compile parameters",
+        "UntypedSelect -> Select; how args are eliminated by transformChild",
+        "The Elab monad (StateT[Result, ElabState, T]) and its combinators",
+        "Auto-prepended phases and why your SelectElaborator always sees clean typed Selects",
+        "Env at elaboration time -> Environment nodes -> Cursor.env at runtime",
+        "addAttribute for synthetic computed fields",
+        "UntypedOperation vs Operation; root type resolution"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Before/after: GraphQL string -> Select(Unique(Filter(Eql(...)))) compiled algebra",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/CompilerSuite.scala #compile_simple / #compile_elaborated",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "EnvironmentMapping: Elab.env + CursorField reading cursor.env end-to-end",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/EnvironmentSuite.scala #env_mapping",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/mappings-cursors.md",
+      "title": "Mappings and cursors",
+      "diataxisType": "explanation",
+      "purpose": "The two-layer model: TypeMapping selects the type, FieldMapping wires the field to data; mkCursorForField -> mkCursorForMappedField dispatch; the cursor focus/tpe duality and the concrete cursor implementations.",
+      "audience": "Developers building or debugging mappings",
+      "outline": [
+        "TypeMapping (ObjectMapping/LeafMapping) vs FieldMapping catalog",
+        "MappingPredicate: TypeMatch/PathMatch/PrefixedTypeMatch and priority",
+        "mkCursorForField -> catalog lookup -> mkCursorForMappedField dispatch per backend",
+        "The focus/tpe duality; navigation pattern-matches (tpe, focus)",
+        "ValueCursor / CirceCursor / generic cursors / SQL cursors as implementations",
+        "No PrimitiveMapping — LeafMapping is the leaf construct; built-in leaf mappings auto-added"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "ValueCursor reference implementation (asList/asNullable/preunique/narrow)",
+          "sourceFileAndRegion": "modules/core/src/main/scala/valuemapping.scala #value_cursor",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/query-interpreter.md",
+      "title": "How the query interpreter works",
+      "diataxisType": "explanation",
+      "purpose": "From query+root cursor to JSON: type-directed dispatch in runValue, runFields/runList, ProtoJson and eager collapse, deferred/staged evaluation, and Result error accumulation (Warning vs Failure; root Failure -> data:null+errors).",
+      "audience": "Developers debugging execution / 'mismatched type' errors",
+      "outline": [
+        "run -> runOneShot/runSubscription -> runRootValue",
+        "Type-directed dispatch in runValue ((query, tpe.dealias) table)",
+        "runFields (objects/__typename/Count) and runList (filter/order/offset/limit/Unique)",
+        "cursorCompatible guards and why mismatches are internal errors",
+        "ProtoJson: partial-result tree and eager collapse to Json",
+        "Deferred/staged evaluation: component/effect, gather/batch/scatter in completeAll",
+        "Error accumulation: Warning vs Failure; root Failure -> data:null + errors"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "runValue dispatch table",
+          "sourceFileAndRegion": "modules/core/src/main/scala/queryinterpreter.scala #run_value",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/schema-model.md",
+      "title": "The schema model",
+      "diataxisType": "explanation",
+      "purpose": "Explain Grackle's in-memory Schema model: Type vs NamedType, TypeRef by-name references, =:=/<:</dealias, root operation types, type extensions, and how SDL parses into it.",
+      "audience": "Developers working with the Schema API",
+      "outline": [
+        "Schema as a collection of NamedTypes + directives + extensions",
+        "Type vs NamedType; TypeRef and value-equality for mutual recursion",
+        "Comparing types: =:= vs <:< vs == vs dealias",
+        "Root operation types & schemaType; default vs explicit schema { }",
+        "Type extensions and how schema.types merges them",
+        "Compile-time schema\"...\" vs runtime Schema(text): Result[Schema]"
+      ],
+      "examples": [
+        {
+          "kind": "mdoc-inline",
+          "description": "schema\"...\" then schema.ref(name); contrast Schema(text) returning Result with a deliberate typo flagged",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/nullability-lists.md",
+      "title": "Nullability and lists",
+      "diataxisType": "explanation",
+      "purpose": "Explain Grackle's inverted nullability (non-null by default, NullableType for optional) and how [T]/[T!]/[T!]! map to ListType/NullableType nestings, plus the navigation helpers that see through modifiers.",
+      "audience": "Anyone confused by model vs SDL nullability",
+      "outline": [
+        "Why Grackle inverts SDL nullability",
+        "How [T], [T!], [T!]! map to ListType/NullableType",
+        "Parser wrapping logic and maxListTypeDepth",
+        "Navigation helpers (underlying, item, isList, isNullable, path*)",
+        "Implications for writing mappings/elaborators"
+      ],
+      "examples": [
+        {
+          "kind": "mdoc-inline",
+          "description": "Inspect isNullable/isList on fields of a small schema (Int! vs String, [Post])",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/effects-batching.md",
+      "title": "Effects and batching internals",
+      "diataxisType": "explanation",
+      "purpose": "Why deferred effects exist, root vs nested attachment points, how EffectElaborator wraps fields, staged interpretation with EffectJson placeholders, and batching by (mapping, handler) to eliminate N+1.",
+      "audience": "Developers reasoning about effect cost/ordering",
+      "outline": [
+        "Separating side-effecting fields from pure tree-walking",
+        "Root effects vs nested effects: two attachment points",
+        "EffectElaborator wraps a field's Select in an Effect node",
+        "Staged interpretation: ProtoJson, EffectJson, scatter/gather",
+        "Batching by (mapping, handler) in completeAll and why it kills N+1",
+        "Cost model: one extra stage per distinct effect field"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "completeAll gather/batch/scatter algorithm",
+          "sourceFileAndRegion": "modules/core/src/main/scala/queryinterpreter.scala #complete_all",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/composition.md",
+      "title": "How cross-mapping delegation executes",
+      "diataxisType": "explanation",
+      "purpose": "Explain staged composition: Delegate -> Component node, deferral as ProtoJson.component, grouping by target mapping in completeAll, combineAndRun batching, and scalars vs lists (Group) with result-name realignment.",
+      "audience": "Developers using ComposedMapping",
+      "outline": [
+        "Why composition is multi-stage (parent can't see child data)",
+        "Delegate -> componentElaborator -> Component node",
+        "Interpretation: join builds continuation, ProtoJson.component deferral",
+        "completeAll groups by mapping and calls combineAndRun, recursing",
+        "Why batching matters; combineAndRun overrides collapse N lookups into 1",
+        "Scalars vs lists (Group) and alias realignment"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "ComposedMapping base class + ComposedCursor (small)",
+          "sourceFileAndRegion": "modules/core/src/main/scala/composedmapping.scala #composed_base",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/concepts/introspection-fragments-variables.md",
+      "title": "Introspection, fragments and variables",
+      "diataxisType": "explanation",
+      "purpose": "What the compiler does automatically: introspection elaboration/execution, @skip/@include, fragment expansion + type narrowing, variable substitution, and input coercion (incl. @oneOf, AbsentValue vs NullValue).",
+      "audience": "Developers debugging query compilation",
+      "outline": [
+        "Introspection as a separate ValueMapping over a meta-schema; IntrospectionLevel",
+        "@skip/@include semantics and that they're stripped before user phases",
+        "Fragment expansion and Narrow(T, child) type narrowing",
+        "Variables: definition, typing, JSON coercion (checkVarValue)",
+        "Input coercion: defaults, AbsentValue vs NullValue, ID widening, @oneOf",
+        "What is automatic vs what you configure"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Typed/inline fragment query compiling to Group/Narrow/Introspect",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/FragmentSuite.scala #fragment_typed",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "@skip/@include with Boolean variables dropping subtrees",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/SkipIncludeSuite.scala #skip_include",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/schema-sdl.md",
+      "title": "Schema & SDL reference",
+      "diataxisType": "reference",
+      "purpose": "Exhaustive reference for the Schema model and SDL: Schema/Type/NamedType hierarchy, type operators, DirectiveDef/Directive, SchemaParser/GraphQLParser.Config, SchemaRenderer, and the schema\"...\"/Schema(text) entry points.",
+      "audience": "Developers looking up schema API details",
+      "outline": [
+        "schema\"...\" interpolator vs Schema(text): Result[Schema]",
+        "Schema trait members (types, ref/uncheckedRef, queryType/mutationType/subscriptionType, schemaType, implementations, subtypes)",
+        "NamedType hierarchy (Scalar/Enum/Interface/Object/Union/InputObject/TypeRef)",
+        "Type modifiers (ListType/NullableType) and the non-null-by-default convention",
+        "Type operators (=:=, <:<, dealias, nullable/nonNull, list/item, underlying*, field/fieldInfo, /)",
+        "DirectiveDef/Directive/builtIns; Ast.DirectiveLocation",
+        "GraphQLParser.Config limits; SchemaRenderer (Schema.toString)"
+      ],
+      "examples": [
+        {
+          "kind": "sdl",
+          "description": "Canonical schema\"...\" example (snip the StarWars #schema)",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala #schema",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Round-trip SDL via SchemaParser/Schema.toString (deserialize schema test)",
+          "sourceFileAndRegion": "modules/core/src/test/scala/sdl/SDLSuite.scala #sdl_roundtrip",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/mapping-types.md",
+      "title": "Mapping types reference",
+      "diataxisType": "reference",
+      "purpose": "The full catalog: Mapping[F] required members + entry points; TypeMapping (ObjectMapping, LeafMapping); FieldMapping (CursorField, ValueField, Delegate, EffectField, RootEffect, RootStream, + circe CirceField/CursorFieldJson); MappingPredicate; TypeMappings builders. States there is no PrimitiveMapping.",
+      "audience": "Developers looking up mapping constructors",
+      "outline": [
+        "Mapping[F]: M, schema, typeMappings; derived compiler/interpreter",
+        "Entry points: compileAndRun, compileAndRunSubscription, combineAndRun, defaultRootCursor",
+        "TypeMapping: ObjectMapping (constructor forms), LeafMapping[T] (Encoder requirement)",
+        "FieldMapping: CursorField, ValueField, Delegate, EffectField, RootEffect, RootStream (+ circe CirceField/CursorFieldJson)",
+        "MappingPredicate: TypeMatch/PathMatch/PrefixedTypeMatch and priority rules",
+        "TypeMappings: apply (checked) vs unchecked vs fromList; auto built-in leaf mappings",
+        "Note: no PrimitiveMapping — LeafMapping is the leaf construct"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Minimal ValueMapping skeleton (schema, refs, typeMappings, selectElaborator)",
+          "sourceFileAndRegion": "modules/core/src/test/scala/composed/ComposedData.scala #composed_currency",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "LeafMapping list for custom scalars/enums",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/ScalarsSuite.scala #scalars_leafmappings",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/query-algebra.md",
+      "title": "Query algebra reference",
+      "diataxisType": "reference",
+      "purpose": "The Query sealed trait and every node (interpretable + pre-elaboration), structural helpers, and type aliases. Replaces the hand-maintained ADT block currently inlined in the in-memory tutorial.",
+      "audience": "Developers reading/writing query-algebra terms",
+      "outline": [
+        "Query trait: ~ and render",
+        "Interpretable nodes: Select, Group, Unique, Filter, Limit, Offset, OrderBy(+OrderSelections/OrderSelection), Count, Narrow, Component, Effect, Environment, TransformCursor, Introspect, Empty",
+        "Pre-elaboration nodes: UntypedSelect, UntypedFragmentSpread/InlineFragment, UntypedFragment, UntypedVarDef, Binding, Value ADT",
+        "Structural helpers: ungroup, children, extractChild, substChild, hasField, fieldAlias, mapFields(R), mergeQueries vs mergeUntypedQueries, FilterOrderByOffsetLimit",
+        "Type aliases: UntypedVarDefs/VarDefs/Vars"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Parse a query string into the UntypedSelect/Binding algebra",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/CompilerSuite.scala #compile_simple",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/predicates.md",
+      "title": "Predicates & terms reference",
+      "diataxisType": "reference",
+      "purpose": "The Term[T]/Path/Predicate ADT: every leaf, the Eq[T] vs Order[T] requirements, Path UniquePath/ListPath selection, term transformers, and the sql-core Like.",
+      "audience": "Developers building filters",
+      "outline": [
+        "Term[T] as a reified Cursor => Result[T]; introspection API",
+        "Path and the Type / 'field' syntax; UniquePath vs ListPath",
+        "Const literals",
+        "Predicate table: True/False, And/Or/Not (+ and/or/combineAll), Eql/NEql, Lt/LtEql/Gt/GtEql, In(+fromEqls), Contains, IsNull, Matches, StartsWith",
+        "Term transformers: AndB/OrB/XorB/NotB, ToUpperCase/ToLowerCase",
+        "Like (sql-core): wildcards, case sensitivity, nullable-term union type",
+        "Required typeclasses per predicate (Eq vs Order)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Predicate vocabulary as used in a real elaborator (And/Not/Lt/In/Contains/IsNull/Like)",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlWorldMapping.scala #world_elaborator",
+          "needsDb": true
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/filtering-paging-nodes.md",
+      "title": "Filtering & paging query nodes reference",
+      "diataxisType": "reference",
+      "purpose": "Focused reference for Filter/OrderBy/OrderSelection(s)/Offset/Limit/Count/TransformCursor and FilterOrderByOffsetLimit's fixed nesting order. Complements the how-to.",
+      "audience": "Developers assembling paging stacks",
+      "outline": [
+        "Filter(pred, child)",
+        "OrderBy/OrderSelections/OrderSelection (ascending, nullsLast, Order[T])",
+        "Offset(num)/Limit(num)",
+        "Count(child)",
+        "TransformCursor(f, child)",
+        "FilterOrderByOffsetLimit constructor/extractor and fixed nesting"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "FilterOrderByOffsetLimit assembled from Options",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlPaging1Mapping.scala #paging1",
+          "needsDb": true
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/cursor.md",
+      "title": "Cursor reference",
+      "diataxisType": "reference",
+      "purpose": "The Cursor trait and all navigation methods, the provided base/proxy cursors, and how to implement a custom cursor.",
+      "audience": "Developers implementing/using cursors",
+      "outline": [
+        "Cursor trait: focus, tpe, context, parent, path/resultPath, env",
+        "Type predicates/accessors: isLeaf/asLeaf, isList/asList/listSize, isNullable/asNullable/isDefined/isNull",
+        "Field navigation: field, fieldAs, nullableField, path/listPath/flatListPath",
+        "Narrowing: narrowsTo/narrow; Unique: preunique",
+        "Casting/env: as, env/envR/fullEnv/withEnv; Cursor.flatten",
+        "Base/proxy cursors: AbstractCursor, ProxyCursor, EmptyCursor, NullCursor, NullFieldCursor, ListTransformCursor, DeferredCursor",
+        "Implementing a custom Cursor (ValueCursor/CirceCursor as templates)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Build a leaf cursor and render with asLeaf; field+asNullable+asLeaf; asList traversal; narrow",
+          "sourceFileAndRegion": "modules/generic/src/test/scala/DerivationSuite.scala #cursor_primitive / #cursor_product / #cursor_list / #cursor_narrow",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/context-env.md",
+      "title": "Context & Env reference",
+      "diataxisType": "reference",
+      "purpose": "Context (rootTpe/path/resultPath/typePath, reversed ordering, derivations, equals/hashCode caveats) and Env (EmptyEnv/NonEmptyEnv, type-checked lookups, addFromQuery).",
+      "audience": "Developers working with cursor context/env",
+      "outline": [
+        "Context fields and tpe derivation; reversed path ordering",
+        "Derivations: asType, forField, forFieldOrAttribute, parent",
+        "Context companion constructors",
+        "equals/hashCode semantics and caveats",
+        "Env: add/get/getR/contains, addFromQuery, type-checked lookups"
+      ],
+      "examples": [
+        {
+          "kind": "mdoc-inline",
+          "description": "Root a Context(IntType), derive a child via forField; Env add/getR round-trip",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/result-problem.md",
+      "title": "Result, Problem & ResultT reference",
+      "diataxisType": "reference",
+      "purpose": "Full Result ADT (Success/Warning/Failure/InternalError), combinators, constructors, typeclass instances, ResultT, and Problem (fields, JSON encoding rules). Documents how each maps to the response and that InternalError raises into F.",
+      "audience": "All developers handling errors",
+      "outline": [
+        "Result ADT and predicates (hasValue/hasProblems/isFailure/isInternalError/toProblems)",
+        "Combinators (map/flatMap/traverse/fold/combine/withProblems/toEither)",
+        "Constructors (success/warning/failure/internalError/fromOption/fromEither/fromProblems/catchNonFatal/combineAllWithDefault)",
+        "Typeclass instances (MonadError/Traverse/Parallel/Semigroup/Eq) and accumulation vs short-circuit",
+        "ResultT[F,A] purpose + constructors",
+        "Problem fields + JSON encoding (empty fields omitted; locations as {line,col}); Eq ignores extensions",
+        "How mkResponse maps cases to the response envelope"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Problem JSON encoding and toString worked examples",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/ProblemSuite.scala #problem_encoding",
+          "needsDb": false
+        },
+        {
+          "kind": "mdoc-inline",
+          "description": "Construct the four Result cases and inspect predicates",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/elab-phases.md",
+      "title": "Elab monad & compiler phases reference",
+      "diataxisType": "reference",
+      "purpose": "The Elab combinator surface, the Phase trait, SelectElaborator factory + low-level form, and the built-in phases (Component/Effect/QuerySize/Introspection/Variables.../MergeFields).",
+      "audience": "Developers writing elaborators/phases",
+      "outline": [
+        "Elab = StateT[Result, ElabState, T]; ElabState fields",
+        "Reader combinators (context/schema/vars/fragments/hasField/hasSibling/resultName/fieldAlias)",
+        "Writer combinators (transformChild overloads, env overloads + envE, addAttribute, push/pop)",
+        "Error reporting (failure/warning/internalError/liftR)",
+        "Phase trait (transform default traversal, transformSelect, validateSubselection, transformFragments)",
+        "SelectElaborator factory vs overriding transform/select; IntrospectionLevel",
+        "Built-in phases: ComponentElaborator, EffectElaborator, QuerySizeValidator, IntrospectionElaborator, VariablesSkipAndFragmentElaborator, MergeFields"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "SelectElaborator pattern matching args -> Elab.transformChild(Unique(Filter(...)))",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/CompilerSuite.scala #atomic_elaborator",
+          "needsDb": false
+        },
+        {
+          "kind": "snip-existing",
+          "description": "Low-level custom Phase overriding transform/select",
+          "sourceFileAndRegion": "modules/core/src/test/scala/compiler/PreserveArgsElaborator.scala #preserve_args",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/sql-mapping.md",
+      "title": "SqlMapping reference",
+      "diataxisType": "reference",
+      "purpose": "Exhaustive SQL field-mapping reference: SqlField flags, SqlObject embedding vs joining, SqlJson, Join forms, ColumnRef/TableDef/RootDef/col, SqlInterfaceMapping/SqlUnionMapping/SqlDiscriminator, FailedJoin, and doobie vs skunk col signatures. Lists the validator's consistency rules.",
+      "audience": "Developers building SQL mappings",
+      "outline": [
+        "SqlField flags (key/hidden/discriminator/associative)",
+        "SqlObject: embedding vs joining",
+        "SqlJson and jsonb sub-tree resolution",
+        "Join: single-pair, composite (List), chained multi-Join",
+        "ColumnRef/TableDef/RootDef/TableName/col",
+        "SqlInterfaceMapping/SqlUnionMapping/SqlDiscriminator constructors",
+        "FailedJoin sentinel",
+        "Backend col signatures: doobie (Meta+nullable) vs skunk (Codec+Option-inferred)",
+        "Validator rules (at-least-one-key, same-table, split-interface/union, discriminator rules)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Abstract codec vocabulary + generic col (SqlTestMapping)",
+          "sourceFileAndRegion": "modules/sql-core/src/test/scala/SqlTestMapping.scala #sql_codecs",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/circe-mapping.md",
+      "title": "CirceMapping reference",
+      "diataxisType": "reference",
+      "purpose": "CirceMapping/CirceMappingLike, CirceField, CursorFieldJson, CirceCursor, circeCursor, and the RootEffect/RootStream computeJson/computeEncodable syntax. Documents the opaque-subtree leaf-validation rules.",
+      "audience": "Developers using the circe backend",
+      "outline": [
+        "CirceMapping[F] (MonadThrow[F]) and CirceMappingLike mixin (SqlMappingLike extends it)",
+        "CirceField / CursorFieldJson (subtree=true, required)",
+        "CirceCursor method behavior (field/asLeaf/asList/narrow/asNullable)",
+        "circeCursor(path, env, value) root vs DeferredCursor",
+        "RootEffect/RootStream computeJson/computeEncodable",
+        "Leaf validation rules (Int re-parse, Float passthrough, enum string, custom-scalar catch-all)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Effectful JSON roots: computeCursor/computeJson/computeEncodable",
+          "sourceFileAndRegion": "modules/circe/src/test/scala/CirceEffectData.scala #circe_effects",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/generic-derivation.md",
+      "title": "Generic derivation reference",
+      "diataxisType": "reference",
+      "purpose": "grackle.generic public surface: CursorBuilder[T], provided implicit builders (and the GraphQL type each maps to), deriveObjectCursorBuilder/deriveInterfaceCursorBuilder/deriveLeafCursorBuilder, ObjectCursorBuilder combinators, GenericField, genericCursor.",
+      "audience": "Developers using generic derivation",
+      "outline": [
+        "CursorBuilder[T]: tpe, build, contramap",
+        "Provided implicit builders + mapped types (Long->Int, Double/Float->Float, Option/List, Enumeration, Encoder leaf->String)",
+        "deriveLeafCursorBuilder/leafCursorBuilder/deriveEnumerationCursorBuilder",
+        "GenericMapping[F] / GenericMappingLike",
+        "semiauto.deriveObjectCursorBuilder/deriveInterfaceCursorBuilder",
+        "ObjectCursorBuilder combinators (renameField/transformFieldNames/transformField)",
+        "GenericField factory + genericCursor",
+        "Scala 2 vs 3 backends — same public API"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Object + interface derivation (StarWars demo)",
+          "sourceFileAndRegion": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala #model_types",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/effects.md",
+      "title": "Effects reference (RootEffect/RootStream/EffectHandler)",
+      "diataxisType": "reference",
+      "purpose": "Authoritative signatures for the Effect node, EffectMapping subtypes, all RootEffect/RootStream factories (incl. circe), EffectField, and the EffectHandler contract/ordering guarantee.",
+      "audience": "Developers using effects",
+      "outline": [
+        "Effect[F] node + EffectMapping trait",
+        "RootEffect: apply/computeUnit/computeCursor/computeChild (+ toRootStream)",
+        "RootStream: apply/computeCursor/computeChild (subscriptions only)",
+        "circe extensions: computeJson/computeEncodable",
+        "EffectField(fieldName, handler, required, hidden)",
+        "EffectHandler.runEffects contract and the one-cursor-per-input ordering rule",
+        "Helpers: Query.childContext/extractChild, combineAndRun",
+        "Where effects run (EffectElaborator; runOneShot roots; completeAll nested)"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "RootEffect/RootStream on one ValueMapping (get/put/watch)",
+          "sourceFileAndRegion": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala #subscription_mapping",
+          "needsDb": false
+        }
+      ],
+      "priority": "P2",
+      "dependsOnExampleCode": false
+    },
+    {
+      "path": "docs/reference/running-operations.md",
+      "title": "Running operations reference",
+      "diataxisType": "reference",
+      "purpose": "compileAndRun vs compileAndRunSubscription vs the compile->interpret->mkResponse pipeline; Operation/UntypedOperation; IntrospectionLevel; the response envelope and the InternalError-raises rule.",
+      "audience": "Developers driving a mapping",
+      "outline": [
+        "compileAndRun signature + exactly-one-element contract",
+        "compileAndRunSubscription (Stream[F, Json])",
+        "compile -> interpret -> mkResponse pipeline",
+        "Operation(query, rootTpe, directives) vs UntypedOperation",
+        "Parameters: name (operationName), untypedVars, introspectionLevel, reportUnused, env",
+        "Response envelope: {data}/{errors}/{errors,data}; InternalError raises into F"
+      ],
+      "examples": [
+        {
+          "kind": "snip-existing",
+          "description": "Run a query and a mutation, then a subscription stream",
+          "sourceFileAndRegion": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala #run_ops",
+          "needsDb": false
+        }
+      ],
+      "priority": "P1",
+      "dependsOnExampleCode": false
+    }
+  ],
+  "exampleCodeToAdd": [
+    {
+      "file": "modules/docs/src/main/scala/grackle/QuickStartMapping.scala",
+      "contains": "A complete minimal in-memory ValueMapping[IO] (small 2-type schema via schema\"...\", a case class + List, ValueObjectMapping/ValueField for each field, and one selectElaborator case turning a String arg into Unique(Filter(Eql(...)))). Used by the quick-start tutorial and as the mapping-types reference skeleton. Must be a compiled, runnable example.",
+      "tags": [
+        "#quickstart"
+      ],
+      "module": "docs (modules/docs). REQUIRES adding .dependsOn(core.jvm) to the docs project so grackle._/grackle.syntax._ and ValueMapping resolve and the file compiles. The snip reads the raw file, but it must also be a real compiled source so the example is guaranteed correct."
+    },
+    {
+      "file": "modules/docs/src/main/scala/grackle/MutationSubscriptionMapping.scala",
+      "contains": "A self-contained ValueMapping[IO] over a SignallingRef[IO, Int] with Query{get}, Mutation{put(n:Int):Int!}, Subscription{watch:Int!}, using RootEffect.computeCursor and RootStream.computeCursor plus an Elab.env elaborator. Mirrors SubscriptionSuite.mapping. Used by the mutations-subscriptions tutorial.",
+      "tags": [
+        "#ms_mapping"
+      ],
+      "module": "docs (modules/docs). REQUIRES docs .dependsOn(core.jvm) (and fs2 already comes transitively via core). Compiled so the tutorial example is guaranteed to work."
+    },
+    {
+      "file": "modules/docs/src/main/scala/grackle/FilterMapping.scala",
+      "contains": "An in-memory ValueMapping[IO] over a List[Item] demonstrating DB-free filtering: Filter(Contains(ItemType / 'tags', Const(tag))) and Filter(Eql(... computed CursorField field ...)). Mirrors PredicatesSuite ItemMapping. Used by the filtering-ordering-paging how-to to prove predicates work without SQL.",
+      "tags": [
+        "#filter"
+      ],
+      "module": "docs (modules/docs). REQUIRES docs .dependsOn(core.jvm). Compiled, no DB."
+    }
+  ],
+  "buildChanges": [
+    "build.sbt: change the `docs` project to depend on the Grackle modules used by snip-from-test-source and by the new compiled docs examples. Replace its bare settings with `.dependsOn(core.jvm, circe.jvm, generic.jvm, doobiepg)` so that (a) the new modules/docs example sources (QuickStartMapping/MutationSubscriptionMapping/FilterMapping) compile against grackle-core, and (b) mdoc-inline blocks that construct Schema/Mapping/Result/Problem values compile. Note: snip-existing of raw test/demo files does NOT itself need a dependency (Output.snip just reads the file), but adding the example deps is required for the compiled docs examples and inline mdoc blocks.",
+    "build.sbt: docs already enables TypelevelSitePlugin (JVM-only) and sets mdocVariables headerVariant=tutorial — keep. Keep coverageEnabled := false. cats-effect dep already present (needed by Output.scala).",
+    "build.sbt: do NOT add a dependency on the `demo` project (it is NoPublish and the demo sources are snipped raw); keep snipping demo files by path as today.",
+    "build.sbt: optionally add `tlSiteApiUrl`/nav is handled by Laika directory.conf, not build.sbt — no change needed there.",
+    "Directory structure: create new doc subdirectories docs/getting-started/, docs/how-to/, docs/concepts/, docs/reference/ (docs/tutorial/ already exists). Each needs a directory.conf (see navConfigs).",
+    "Add `// #tag` region markers to the existing test/demo sources that are snipped as snip-existing (these are pre-existing compiled sources, so adding comment markers is safe and does not change behaviour). The full list of tags to add is enumerated in the per-page examples (e.g. SqlWorldMapping #world_typemappings/#world_elaborator, ComposedData #composed_*, CirceData #circe_mapping, ScalarsSuite #scalars_*, SubscriptionSuite #subscription_mapping/#run_ops, etc.). These edits live in modules/*/src/test/scala and demo/src/main/scala, NOT in modules/docs.",
+    "No new third-party library dependencies are required beyond the inter-module .dependsOn wiring above; all examples use modules already in the build."
+  ],
+  "navConfigs": [
+    {
+      "path": "docs/directory.conf",
+      "contents": "laika.navigationOrder = [\n  index.md\n  getting-started\n  tutorial\n  how-to\n  concepts\n  reference\n  CONTRIBUTING.md\n]\n"
+    },
+    {
+      "path": "docs/getting-started/directory.conf",
+      "contents": "laika.title = Getting Started\nlaika.navigationOrder = [\n  overview.md\n  install.md\n  quick-start.md\n]\n"
+    },
+    {
+      "path": "docs/tutorial/directory.conf",
+      "contents": "laika.title = Tutorials\nlaika.navigationOrder = [\n  intro.md\n  in-memory-model.md\n  db-backed-model.md\n  mutations-subscriptions.md\n]\n"
+    },
+    {
+      "path": "docs/how-to/directory.conf",
+      "contents": "laika.title = How-to Guides\nlaika.navigationOrder = [\n  filtering-ordering-paging.md\n  compose-mappings.md\n  sql-backends.md\n  interfaces-unions.md\n  jsonb-columns.md\n  custom-scalars-enums.md\n  schema-directives.md\n  query-directives.md\n  effects-batching.md\n  errors.md\n  validate-mappings.md\n  generic-derivation.md\n  circe-backend.md\n  serve-over-http.md\n]\n"
+    },
+    {
+      "path": "docs/concepts/directory.conf",
+      "contents": "laika.title = Concepts\nlaika.navigationOrder = [\n  architecture.md\n  compiler-elaboration.md\n  mappings-cursors.md\n  query-interpreter.md\n  schema-model.md\n  nullability-lists.md\n  effects-batching.md\n  composition.md\n  introspection-fragments-variables.md\n]\n"
+    },
+    {
+      "path": "docs/reference/directory.conf",
+      "contents": "laika.title = Reference\nlaika.navigationOrder = [\n  schema-sdl.md\n  mapping-types.md\n  query-algebra.md\n  predicates.md\n  filtering-paging-nodes.md\n  cursor.md\n  context-env.md\n  result-problem.md\n  elab-phases.md\n  sql-mapping.md\n  circe-mapping.md\n  generic-derivation.md\n  effects.md\n  running-operations.md\n]\n"
+    }
+  ],
+  "risks": [
+    "The docs project currently depends ONLY on cats-effect, not on any Grackle module. Any compiled mdoc-inline example or new docs example source will fail to compile until build.sbt adds .dependsOn(core.jvm, circe.jvm, generic.jvm, doobiepg). This is the single biggest build-readiness risk; prefer snip-existing/snip-new-in-demo over mdoc-inline where possible to limit the blast radius.",
+    "snip-from-test-source requires editing many test files to add `// #tag` markers. The Output.snip extractor takes EVERYTHING between two lines containing the tag, so tags must bracket exactly the intended region and the region must be self-explanatory out of context (test files often interleave assertions). Mis-placed tags will silently include/exclude lines. Each new tag must be verified against the current source line ranges (the briefs cite line numbers that may drift).",
+    "Output.snip reads files via a RELATIVE path (Path.of(path)) resolved against the mdoc/site working directory (the repo root, as the existing demo snips prove). Snipping from modules/*/src/test/scala and modules/docs/src/main relies on the same cwd; if Laika/mdoc runs from a different base the relative paths break. Verify the working directory before authoring many test-source snips.",
+    "DB-dependent examples (SQL how-tos, paging, interfaces/unions, jsonb, mutations-SQL, nested effects) must be snip-only or compile-only and MUST NOT be executed at docs-build time (no live DB during site build). They are all marked snip-existing precisely so no DB is needed; do not convert any of them to runnable mdoc blocks.",
+    "Scala 2 vs 3 divergence: generic derivation, the schema/doc interpolators, and Like live in scala-2/scala-3 source roots. mdoc compiles under one Scala version per docs build; examples that touch version-specific internals should snip the shared public API, not the per-version implementation, to avoid build breakage on the other axis.",
+    "The in-memory tutorial currently hand-maintains a Query-algebra ADT block and 'before/after' elaboration terms as plain (uncompiled) ```scala blocks. These can drift from the real source. The plan moves the authoritative ADT to reference/query-algebra.md (snipped), but if the tutorial keeps illustrative uncompiled snippets they remain a drift risk and should be clearly marked as illustrative.",
+    "The StarWars demo is simultaneously the in-memory tutorial AND the generic-derivation example. Reusing its snips across tutorial/in-memory-model.md and how-to/generic-derivation.md is intentional (minimizes new code) but means changes to the demo source affect multiple pages — keep tag regions stable.",
+    "Volume: this plan adds ~36 new pages plus tag edits across ~25 source files. Authoring is large; P0/P1 prioritization is provided so a first publishable cut (Getting Started + 3 tutorials + core how-tos + key references) can ship before the P2 long tail.",
+    "mkResponse/InternalError behaviour (internal errors raise into F rather than appearing as GraphQL errors) is subtle and easy to mis-document; the errors how-to and result-problem reference must state it explicitly to avoid implying internal errors come back as JSON.",
+    "No built-in Relay connection type and no built-in websocket/graphql-ws transport exist. The paging how-to and the serve-over-http/subscriptions pages must avoid implying ready-made helpers exist, or readers will look for APIs that aren't there."
+  ],
+  "crossCuttingNotes": [
+    "Reuse over rewrite: the existing demo (StarWars generic, World SQL) is already snip-tagged and compiled; the three retained tutorials keep their current snips. New compiled example code is limited to three small files in modules/docs (quick-start, mutations+subscriptions, in-memory filtering) — everything else is snip-existing from demo or test sources, satisfying the 'minimize new code' constraint.",
+    "Snip strategy precedence used throughout: (1) snip-existing from demo (already tagged, compiled, no new deps) > (2) snip-existing from test sources (compiled, but need new // #tag markers; no docs-module dep needed since Output.snip reads raw files) > (3) snip-new compiled example in modules/docs (needs docs .dependsOn) > (4) mdoc-inline (compiled inline; needs docs .dependsOn; used sparingly for tiny schema/Result/Problem illustrations).",
+    "DB safety invariant: every example whose needsDb=true is snip-existing or compile-only and is never executed at site-build time. The site build only runs mdoc-inline blocks and the three new compiled modules/docs examples, all of which are DB-free.",
+    "Diátaxis discipline: Tutorials are end-to-end and runnable; How-to pages are task recipes that may snip DB-backed code; Concepts explain mechanisms (no exhaustive signatures); Reference pages are signature-dense and snip from main sources. Cross-links flow tutorial->how-to->reference and how-to->concepts.",
+    "Consolidation: the hand-maintained Query-algebra ADT and elaboration before/after currently inlined in in-memory-model.md are superseded by reference/query-algebra.md and concepts/compiler-elaboration.md (both snipped from real sources) to remove drift. The tutorial should link to them rather than duplicate.",
+    "Effects and composition appear in BOTH a How-to (task recipe) and a Concepts page (mechanism). This is deliberate Diátaxis separation, not duplication: the how-to shows the steps, the concept explains staging/batching. Keep the snipped code in the how-to and keep the concept prose-focused.",
+    "Every new section gets its own directory.conf for Laika nav ordering and a section title; the top-level docs/directory.conf is extended to order the five sections. CONTRIBUTING.md stays last.",
+    "Tag-naming convention for new snips: lowercase, hyphen/underscore, prefixed per file purpose (e.g. #world_elaborator, #composed_mapping, #circe_mapping, #scalars_leafmappings) to keep them greppable and avoid collisions, since Output.snip matches any line CONTAINING the tag string."
+  ]
+}

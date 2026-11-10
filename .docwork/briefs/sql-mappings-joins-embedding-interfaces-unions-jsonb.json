@@ -1,0 +1,339 @@
+{
+  "subsystem": "SQL mappings (joins, embedding, interfaces, unions, jsonb)",
+  "summary": "Grackle's SQL mappings let you serve a GraphQL schema directly from relational tables by declaring, per GraphQL object type, how each field maps to a SQL column (`SqlField`), a sub-object reached by a join (`SqlObject` + `Join`), or a `jsonb` column whose JSON sub-tree is navigated in-process (`SqlJson`). The mapping machinery lives in `modules/sql-core/src/main/scala/SqlMapping.scala` under the `SqlMappingLike[F]` trait, which is database-agnostic; backend modules (`doobie-core`, `skunk`) supply concrete `Codec`/`Encoder`/`Fragment` types and a `col` helper. Grackle compiles a GraphQL query into a single (or few) SQL statement(s), joining and embedding rows as needed, and handles interfaces/unions by mapping all subtypes onto shared columns and using an `SqlDiscriminator` to pick the concrete type per row. Key column references are `ColumnRef` (built via `col`) grouped under `TableDef`/`RootDef`; joins are `Join` of one-or-more `(ColumnRef, ColumnRef)` condition pairs, enabling composite-key and multi-table chained joins. Embedded (synopses-style) objects share a parent table and are addressed with `PrefixedMapping` when the same GraphQL type appears under different parents.",
+  "keyConcepts": [
+    {
+      "name": "ColumnRef and the col helper",
+      "explanation": "Every mapped column is a `ColumnRef(table, column, codec, scalaTypeName, pos)`. You never construct it directly; you call `col(name, codec)` inside a `TableDef`/`RootDef`, which captures the table name (via an implicit `TableName`), the Scala type name, and source position. Two `ColumnRef`s are equal iff their table and column names match (codec is ignored in equals/hashCode), so the same physical column referenced twice is treated as one."
+    },
+    {
+      "name": "TableDef / RootDef / TableName",
+      "explanation": "`class TableDef(name)` provides an implicit `TableName` so `col(...)` calls inside it bind to that table; you subclass it as `object country extends TableDef(\"country\")`. `RootDef` binds columns to the synthetic `<root>` table (TableName.rootName) for computed/aggregate root fields like `numCountries`."
+    },
+    {
+      "name": "SqlField",
+      "explanation": "Maps a scalar GraphQL leaf field to a column. Flags: `key=true` marks an identity column used to group/assemble rows (an object mapping must have at least one key); `hidden=true` includes the column in SQL (e.g. for a join or discriminator) but omits it from GraphQL output; `discriminator=true` marks the column read by an interface/union discriminator; `associative=true` marks a key that is not a DB primary key (may repeat), e.g. a language code shared across rows."
+    },
+    {
+      "name": "SqlObject + Join",
+      "explanation": "Maps a sub-object/list field. With no `Join`, the child object is *embedded* — it reuses the parent's table/row (e.g. a `Synopses` value built from columns on the `films` row). With one or more `Join`s, Grackle emits a SQL join from parent columns to child columns. `Join(parentCol, childCol)` is sugar for a single condition; `Join(List((p1,c1),(p2,c2)))` expresses composite-key joins; passing several `Join`s to `SqlObject(name, j1, j2, ...)` chains multi-table (associative-table) joins."
+    },
+    {
+      "name": "SqlJson",
+      "explanation": "Maps a GraphQL object/interface field to a `jsonb` column. Unlike `SqlObject`, the JSON sub-tree below it is navigated entirely in-process by a `CirceCursor` — no further SQL is issued for nested selections, fragments, enums, arrays, or `__typename`. `SqlJson.subtree = true` signals that child selections are not SQL-mapped."
+    },
+    {
+      "name": "Embedding vs joining",
+      "explanation": "Embedding = a GraphQL sub-object that lives on the same row as its parent (SqlObject with no Join, child SqlFields point at the parent's table). Joining = a sub-object on a different table reached via Join. The world mapping's `Country.cities` is a join; the embedding mapping's `Film.synopses` is embedded."
+    },
+    {
+      "name": "PrefixedMapping for shared embedded types",
+      "explanation": "When one embedded GraphQL type (e.g. `Synopses`) is reached under multiple parents (films/synopses, series/synopses, episodes/synopses) and each parent stores it in a different table, you provide a `PrefixedMapping` keyed by the result-path prefix so each occurrence binds to the right table's columns."
+    },
+    {
+      "name": "SqlInterfaceMapping + SqlDiscriminator",
+      "explanation": "An interface is mapped with `SqlInterfaceMapping(tpe, discriminator, fieldMappings)` over the shared/super-table; concrete subtypes are ordinary `ObjectMapping`s adding their extra columns on the same table. The `SqlDiscriminator` has `discriminate(cursor): Result[Type]` (compute concrete type of a fetched row) and `narrowPredicate(tpe): Result[Predicate]` (a WHERE predicate to select only rows of a given subtype). The discriminating column is an `SqlField(..., discriminator = true)`."
+    },
+    {
+      "name": "SqlUnionMapping",
+      "explanation": "A union is mapped with `SqlUnionMapping(tpe, discriminator, fieldMappings)`. All members must share a table; the union mapping holds only hidden key + hidden discriminator fields; each member `ObjectMapping` maps its own column on the shared table. Union member field mappings must be hidden, and SqlJson/sub-object fields are not allowed directly in the union mapping."
+    },
+    {
+      "name": "Doobie vs Skunk codecs",
+      "explanation": "The abstract `Codec` type is filled per backend. Doobie (`DoobieMappingLike`): `Codec = (Meta[_], Boolean)`, `Encoder = (Put[_], Boolean)`, `Fragment = doobie.Fragment`; `col(name, Meta[T], nullable=false)`. Skunk (`SkunkMappingLike`): `Codec = (skunk.Codec[_], Boolean)`, `Encoder = skunk.Encoder[_]`, `Fragment = skunk.AppliedFragment`; `col(name, skunk.Codec[T])` with nullability derived from `Option[T]` via implicit `IsNullable`. The boolean in each Codec tuple is the nullability flag."
+    },
+    {
+      "name": "FailedJoin sentinel",
+      "explanation": "When an outer join produces no child row, non-nullable child columns decode to the `FailedJoin` case object rather than null, so Grackle can distinguish a genuinely-absent join target from a SQL NULL value."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "SqlMappingLike",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "trait SqlMappingLike[F[_]] extends CirceMappingLike[F] with SqlModule[F] { self =>",
+      "purpose": "The database-agnostic core trait that defines all SQL field-mapping types (SqlField, SqlObject, SqlJson, Join, ColumnRef, TableDef, SqlInterfaceMapping, SqlUnionMapping, SqlDiscriminator) and the query-to-SQL compiler. Backend traits (DoobieMappingLike, SkunkMappingLike) extend it to supply Codec/Encoder/Fragment and `col`."
+    },
+    {
+      "name": "ColumnRef",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "case class ColumnRef(table: String, column: String, codec: Codec, scalaTypeName: String, pos: SourcePos)",
+      "purpose": "Reference to a single SQL column plus its codec; equality is by (table, column) only. Built via `col`, consumed by SqlField/SqlJson/Join."
+    },
+    {
+      "name": "TableDef",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "class TableDef(name: String) { implicit val tableName: TableName = TableName(name) }",
+      "purpose": "Base class for per-table column-definition objects; its implicit TableName binds enclosed `col(...)` calls to this table."
+    },
+    {
+      "name": "RootDef",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "class RootDef { implicit val tableName: TableName = TableName.rootTableName }",
+      "purpose": "Like TableDef but binds columns to the synthetic <root> table, for computed/aggregate root fields (e.g. numCountries)."
+    },
+    {
+      "name": "SqlField",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "case class SqlField(fieldName: String, columnRef: ColumnRef, key: Boolean = false, discriminator: Boolean = false, hidden: Boolean = false, associative: Boolean = false)(implicit val pos: SourcePos) extends SqlFieldMapping",
+      "purpose": "Maps a GraphQL leaf field to a column, with key/hidden/discriminator/associative flags."
+    },
+    {
+      "name": "SqlObject",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "case class SqlObject(fieldName: String, joins: List[Join])(implicit val pos: SourcePos) extends SqlFieldMapping  // companion: def apply(fieldName: String, joins: Join*)(implicit pos: SourcePos): SqlObject",
+      "purpose": "Maps a GraphQL sub-object/list field. Empty joins => embedded (same row); one or more joins => SQL join(s)."
+    },
+    {
+      "name": "SqlJson",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "case class SqlJson(fieldName: String, columnRef: ColumnRef)(implicit val pos: SourcePos) extends SqlFieldMapping { def subtree = true }",
+      "purpose": "Maps a GraphQL object/interface field onto a jsonb column; nested selection is resolved in-process from the decoded JSON."
+    },
+    {
+      "name": "Join",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "case class Join(conditions: List[(ColumnRef, ColumnRef)])  // companion: def apply(parent: ColumnRef, child: ColumnRef): Join = new Join(List((parent, child)))",
+      "purpose": "One join's ON conditions as parent->child column pairs. List form expresses composite-key joins; multiple Joins on an SqlObject chain through intermediate tables."
+    },
+    {
+      "name": "SqlDiscriminator",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "trait SqlDiscriminator { def narrowPredicate(tpe: Type): Result[Predicate]; def discriminate(cursor: Cursor): Result[Type] }",
+      "purpose": "Strategy supplied to interface/union mappings: narrowPredicate filters rows to a subtype, discriminate computes a row's concrete type."
+    },
+    {
+      "name": "SqlInterfaceMapping",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "sealed trait SqlInterfaceMapping extends ObjectMapping with SqlDiscriminatedType  // object SqlInterfaceMapping { def apply(tpe: NamedType, discriminator: SqlDiscriminator)(fieldMappings: FieldMapping*)(implicit pos): ObjectMapping ; def apply(tpe: NamedType, fieldMappings: List[FieldMapping], discriminator: SqlDiscriminator)(implicit pos): ObjectMapping ; def apply(path: Path, discriminator: SqlDiscriminator)(fieldMappings: FieldMapping*) ; def apply(predicate: MappingPredicate, discriminator: SqlDiscriminator)(fieldMappings: FieldMapping*) }",
+      "purpose": "Maps a GraphQL interface onto a shared table with a discriminator. Note the two arities: varargs fieldMappings, OR (tpe, List[FieldMapping], discriminator) with named-arg `discriminator=` (the form used in the tests)."
+    },
+    {
+      "name": "SqlUnionMapping",
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "signature": "sealed trait SqlUnionMapping extends ObjectMapping with SqlDiscriminatedType  // object SqlUnionMapping { def apply(tpe: NamedType, discriminator: SqlDiscriminator)(fieldMappings: FieldMapping*)(implicit pos): ObjectMapping ; def apply(tpe: NamedType, fieldMappings: List[FieldMapping], discriminator: SqlDiscriminator)(implicit pos): ObjectMapping ; def apply(path: Path, ...) ; def apply(predicate: MappingPredicate, ...) }",
+      "purpose": "Maps a GraphQL union onto a shared table; holds only hidden key + hidden discriminator fields, with member objects mapping their own columns."
+    },
+    {
+      "name": "DoobieMappingLike",
+      "file": "modules/doobie-core/src/main/scala/DoobieMapping.scala",
+      "signature": "trait DoobieMappingLike[F[_]] extends Mapping[F] with SqlMappingLike[F] { type Codec = (Meta[_], Boolean); type Encoder = (Put[_], Boolean); type Fragment = DoobieFragment ; def col[T](colName: String, codec: Meta[T], nullable: Boolean = false)(implicit tableName: TableName, typeName: TypeName[T], pos: SourcePos): ColumnRef }",
+      "purpose": "Doobie backend: fills Codec/Encoder/Fragment and a `col` that takes a doobie Meta plus explicit nullable flag."
+    },
+    {
+      "name": "SkunkMappingLike",
+      "file": "modules/skunk/shared/src/main/scala/SkunkMapping.scala",
+      "signature": "trait SkunkMappingLike[F[_]] extends Mapping[F] with SqlPgMappingLike[F] { type Codec = (skunk.Codec[_], Boolean); type Encoder = skunk.Encoder[_]; type Fragment = skunk.AppliedFragment ; def col[T](colName: String, codec: skunk.Codec[T])(implicit tableName: TableName, typeName: NullableTypeName[T], isNullable: IsNullable[T], pos: SourcePos): ColumnRef }",
+      "purpose": "Skunk backend: fills Codec/Encoder/Fragment and a `col` taking a skunk Codec; nullability is inferred from Option[T] via implicit IsNullable rather than an explicit flag."
+    },
+    {
+      "name": "FailedJoin",
+      "file": "modules/sql-core/src/main/scala/FailedJoin.scala",
+      "signature": "case object FailedJoin",
+      "purpose": "Sentinel decoded in place of non-nullable columns of a failed (empty) outer join."
+    },
+    {
+      "name": "SqlTestMapping",
+      "file": "modules/sql-core/src/test/scala/SqlTestMapping.scala",
+      "signature": "trait SqlTestMapping[F[_]] extends SqlMappingLike[F] { type TestCodec[T] <: Codec ; def col[T](colName: String, codec: TestCodec[T])(implicit tableName: TableName, typeName: TypeName[T], pos: SourcePos): ColumnRef = ColumnRef(tableName.name, colName, codec, typeName.value, pos) }",
+      "purpose": "Backend-neutral test base that abstracts codecs (bool/text/int4/jsonb/nullable/list/...) so one mapping definition runs against both doobie and skunk concrete suites."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "One-to-many join: Country.cities",
+      "code": "object country extends TableDef(\"country\") {\n  val code = col(\"code\", bpchar(3))\n  val name = col(\"name\", nvarchar)\n}\nobject city extends TableDef(\"city\") {\n  val id          = col(\"id\", int4)\n  val countrycode = col(\"countrycode\", bpchar(3))\n  val name        = col(\"name\", nvarchar)\n}\n\nObjectMapping(\n  tpe = CountryType,\n  fieldMappings = List(\n    SqlField(\"code\", country.code, key = true, hidden = true),\n    SqlField(\"name\", country.name),\n    SqlObject(\"cities\", Join(country.code, city.countrycode))\n  )\n)\nObjectMapping(\n  tpe = CityType,\n  fieldMappings = List(\n    SqlField(\"id\", city.id, key = true, hidden = true),\n    SqlField(\"countrycode\", city.countrycode, hidden = true),\n    SqlField(\"name\", city.name),\n    SqlObject(\"country\", Join(city.countrycode, country.code))\n  )\n)",
+      "explanation": "Standard parent->child join. `key = true, hidden = true` on `code`/`id` means the column is fetched to assemble rows but not exposed in GraphQL. The reverse `City.country` join reuses the same column pair in the other direction. From SqlWorldMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Embedded sub-object (no join): Film.synopses",
+      "code": "object films extends TableDef(\"films\") {\n  val title         = col(\"title\", text)\n  val synopsisShort = col(\"synopsis_short\", nullable(text))\n  val synopsisLong  = col(\"synopsis_long\", nullable(text))\n}\n\nObjectMapping(\n  tpe = FilmType,\n  fieldMappings = List(\n    SqlField(\"title\", films.title, key = true),\n    SqlObject(\"synopses\")               // no Join => embedded on the films row\n  )\n)\nObjectMapping(\n  tpe = SynopsesType,\n  fieldMappings = List(\n    SqlField(\"title\", films.title, key = true, hidden = true),\n    SqlField(\"short\", films.synopsisShort),\n    SqlField(\"long\",  films.synopsisLong)\n  )\n)",
+      "explanation": "`SqlObject(\"synopses\")` with no Join means the Synopses object is built from columns on the same films row. Note the embedded Synopses mapping repeats the parent key (hidden) so rows can be grouped. From SqlEmbeddingMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Shared embedded type under multiple parents: PrefixedMapping",
+      "code": "PrefixedMapping(\n  tpe = SynopsesType,\n  mappings = List(\n    List(\"films\", \"synopses\") -> ObjectMapping(\n      tpe = SynopsesType,\n      fieldMappings = List(\n        SqlField(\"title\", films.title, key = true, hidden = true),\n        SqlField(\"short\", films.synopsisShort),\n        SqlField(\"long\",  films.synopsisLong)\n      )\n    ),\n    List(\"series\", \"synopses\") -> ObjectMapping(\n      tpe = SynopsesType,\n      fieldMappings = List(\n        SqlField(\"title\", series.title, key = true, hidden = true),\n        SqlField(\"short\", series.synopsisShort),\n        SqlField(\"long\",  series.synopsisLong)\n      )\n    )\n  )\n)",
+      "explanation": "When the same GraphQL type (Synopses) is embedded under different parents stored in different tables, PrefixedMapping selects the right ObjectMapping by GraphQL result-path prefix. From SqlEmbeddingMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Composite-key join",
+      "code": "object compositeKeyParent extends TableDef(\"composite_key_parent\") {\n  val key1 = col(\"key_1\", int4)\n  val key2 = col(\"key_2\", varchar)\n}\nobject compositeKeyChild extends TableDef(\"composite_key_child\") {\n  val id      = col(\"id\", int4)\n  val parent1 = col(\"parent_1\", int4)\n  val parent2 = col(\"parent_2\", varchar)\n}\n\nObjectMapping(\n  tpe = ParentType,\n  fieldMappings = List(\n    SqlField(\"key1\", compositeKeyParent.key1, key = true),\n    SqlField(\"key2\", compositeKeyParent.key2, key = true),\n    SqlObject(\"children\", Join(List(\n      (compositeKeyParent.key1, compositeKeyChild.parent1),\n      (compositeKeyParent.key2, compositeKeyChild.parent2)\n    )))\n  )\n)",
+      "explanation": "A Join whose `conditions` list has two pairs ANDs both equalities in the ON clause. Both parent columns are marked `key = true`. From SqlCompositeKeyMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Interface mapping with discriminator",
+      "code": "SqlInterfaceMapping(\n  tpe = EType,                       // interface Entity\n  discriminator = entityTypeDiscriminator,\n  fieldMappings = List(\n    SqlField(\"id\", entities.id, key = true),\n    SqlField(\"entityType\", entities.entityType, discriminator = true),\n    SqlField(\"title\", entities.title),\n    SqlObject(\"synopses\")\n  )\n),\nObjectMapping(                       // type Film implements Entity\n  tpe = FilmType,\n  fieldMappings = List(\n    SqlField(\"rating\", entities.filmRating),\n    SqlField(\"label\",  entities.filmLabel),\n    SqlField(\"imageUrl\", entities.imageUrl)\n  )\n)\n\nlazy val entityTypeDiscriminator = new SqlDiscriminator {\n  def discriminate(c: Cursor): Result[Type] =\n    c.fieldAs[EntityType](\"entityType\").map {\n      case EntityType.Film   => FilmType\n      case EntityType.Series => SeriesType\n    }\n  def narrowPredicate(subtpe: Type): Result[Predicate] = subtpe match {\n    case FilmType   => Eql(EType / \"entityType\", Const(EntityType.Film)).success\n    case SeriesType => Eql(EType / \"entityType\", Const(EntityType.Series)).success\n    case _ => Result.internalError(s\"Invalid discriminator: $subtpe\")\n  }\n}",
+      "explanation": "All subtypes (Film/Series) live in one `entities` table; the interface mapping holds the shared columns plus a `discriminator = true` field. Subtype ObjectMappings add only their extra columns on the same table. From SqlInterfacesMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Union mapping (all members on one table, all fields hidden)",
+      "code": "object collections extends TableDef(\"collections\") {\n  val id       = col(\"id\", text)\n  val itemType = col(\"item_type\", text)\n  val itemA    = col(\"itema\", text)\n  val itemB    = col(\"itemb\", text)\n}\n\nSqlUnionMapping(\n  tpe = ItemType,                    // union Item = ItemA | ItemB\n  discriminator = itemTypeDiscriminator,\n  fieldMappings = List(\n    SqlField(\"id\", collections.id, key = true, hidden = true),\n    SqlField(\"itemType\", collections.itemType, discriminator = true, hidden = true)\n  )\n),\nObjectMapping(tpe = ItemAType, fieldMappings = List(\n  SqlField(\"id\", collections.id, key = true, hidden = true),\n  SqlField(\"itema\", collections.itemA)\n)),\nObjectMapping(tpe = ItemBType, fieldMappings = List(\n  SqlField(\"id\", collections.id, key = true, hidden = true),\n  SqlField(\"itemb\", collections.itemB)\n))\n\nobject itemTypeDiscriminator extends SqlDiscriminator {\n  def discriminate(c: Cursor): Result[Type] =\n    c.fieldAs[String](\"itemType\").map { case \"ItemA\" => ItemAType; case \"ItemB\" => ItemBType }\n  def narrowPredicate(subtpe: Type): Result[Predicate] = subtpe match {\n    case ItemAType => Eql(ItemType / \"itemType\", Const(\"ItemA\")).success\n    case ItemBType => Eql(ItemType / \"itemType\", Const(\"ItemB\")).success\n    case _ => Result.internalError(s\"Invalid discriminator: $subtpe\")\n  }\n}",
+      "explanation": "The union mapping carries only the (hidden) key and (hidden) discriminator; each member object maps its own column on the shared `collections` table. Both fields in the union mapping must be hidden. From SqlUnionsMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "jsonb column mapped with SqlJson",
+      "code": "object records extends TableDef(\"records\") {\n  val id     = col(\"id\", int4)\n  val record = col(\"record\", nullable(jsonb))\n}\n\nObjectMapping(\n  tpe = RowType,\n  fieldMappings = List(\n    SqlField(\"id\", records.id, key = true),\n    SqlJson(\"record\", records.record),\n    SqlJson(\"nonNullRecord\", records.record)\n  )\n)",
+      "explanation": "`SqlJson` binds the GraphQL `Record` object (with nested objects, enums, arrays and interface members) to a single jsonb column. Grackle fetches the jsonb once and navigates all nested selections, fragments and __typename in-process. Note the same column can back both a nullable and a non-null GraphQL field. From SqlJsonbMapping.scala.",
+      "needsDb": true
+    },
+    {
+      "title": "Doobie vs Skunk column codecs",
+      "code": "// Doobie: col takes a Meta plus explicit nullable flag\nobject country extends TableDef(\"country\") {\n  val code      = col(\"code\", Meta[String])\n  val indepyear = col(\"indepyear\", Meta[Int], nullable = true)\n  val numCities = col(\"num_cities\", Meta[Long])\n}\n\n// Skunk: col takes a skunk Codec; nullability inferred from Option[T] (use .opt)\n//   def text: TestCodec[String]   = (codec.text, false)\n//   def nullable[T](c): TestCodec[T] = (c._1.opt, true)\n//   val record = col(\"record\", ccodec.jsonb)        // skunk-circe jsonb codec",
+      "explanation": "Doobie's `col` is `col(name, Meta[T], nullable = Boolean)`; Skunk's `col(name, skunk.Codec[T])` derives nullability from whether the codec is for `Option[T]`. The doobie example is from demo/world/WorldMapping.scala; the skunk codec helpers from SkunkDatabaseSuite.scala.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "Every object type mapping must declare at least one `key = true` field (direct or inherited), or validation fails with `NoKeyInObjectTypeMapping` (\"Object type mappings must include at least one direct or inherited key field mapping\").",
+    "All SqlField/SqlObject columns of a single (non-interface/non-union) object type mapping must come from the same table, otherwise `SplitObjectTypeMapping`/`SplitEmbeddedObjectTypeMapping` fails. To span tables, use `SqlObject` + `Join` (a sub-object) instead.",
+    "Interface and union subtypes must all be mapped onto the SAME shared table as the interface/union mapping; the subtype ObjectMappings only add extra columns on that table. `SplitInterfaceTypeMapping`/`SplitUnionTypeMapping` reject splitting across tables.",
+    "In a union mapping every member field mapping must be hidden (`NonHiddenUnionFieldMapping`), and you cannot put `SqlObject` sub-objects (`IllegalSubobjectInUnionTypeMapping`) or `SqlJson` fields (`IllegalJsonInUnionTypeMapping`) directly in the union mapping — map those on the member ObjectMappings.",
+    "An interface/union mapping must have a discriminator field, and the discriminator field must not be polymorphic: `NoDiscriminatorInObjectTypeMapping` / `IllegalPolymorphicDiscriminatorFieldMapping`.",
+    "`associative = true` is only valid on a key field; an associative non-key triggers `AssocFieldNotKey`. Use it for keys that aren't DB primary keys and can repeat (e.g. `Language.language` shared across countries) so rows group correctly.",
+    "`ColumnRef` equality and hashCode use only (table, column) — the codec is ignored. Referencing the same physical column with two different codecs yields 'equal' ColumnRefs, which can mask codec mismatches.",
+    "Join requires conditions: `SqlObject(\"x\", Join(...))` with an empty condition list fails `NoJoinConditions`; chained multi-Join SqlObjects must have parent->child tables that line up or you get `MisalignedJoins` / `InconsistentJoinConditions`.",
+    "`SqlObject(name)` with NO Join means *embedding* (child reuses parent's row/table), which is easy to confuse with a join. If you intend a separate table you must pass a `Join`.",
+    "Under `SqlJson`, nested fields are resolved from the decoded JSON in-process, not via SQL — so you cannot join out of, filter on, or order by fields inside a jsonb sub-tree; they behave like a Circe value mapping. A non-nullable SqlJson field whose column is actually NULL/absent will error ('expected jsonb value').",
+    "Doobie and Skunk differ in how nullability is specified: doobie `col(name, Meta[T], nullable = true)` vs skunk `col(name, codec.opt)` (inferred from Option[T]). The Codec is a `(codec, Boolean)` tuple in both, where the Boolean is the nullability flag.",
+    "Failed outer joins decode non-nullable child columns to the `FailedJoin` sentinel object (not null); code that inspects raw row arrays must account for it.",
+    "When the same GraphQL embedded type appears under multiple parents in different tables, a plain ObjectMapping is ambiguous — you must use `PrefixedMapping` keyed by the result-path prefix (e.g. List(\"films\",\"synopses\")).",
+    "Hidden columns (`hidden = true`) are still fetched and used for joins/keys/discriminators but omitted from the GraphQL response; forgetting `hidden = true` on join/discriminator columns leaks them or pollutes the schema-vs-mapping consistency checks."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/sql-core/src/test/scala/SqlWorldMapping.scala",
+      "region": "typeMappings (lines ~118-179): ObjectMapping for Country/City/Language with SqlField key/hidden flags, SqlObject+Join, associative key",
+      "whatItShows": "Canonical multi-table relational mapping: one-to-many and many-to-one joins, hidden join columns, an associative key (Language.language)."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlEmbeddingMapping.scala",
+      "region": "whole file (TableDefs films/series/episodes; typeMappings with SqlObject(\"synopses\") embedding + PrefixedMapping)",
+      "whatItShows": "Embedding a sub-object on the parent row, plus PrefixedMapping for a shared embedded type across multiple parents/tables."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlCompositeKeyMapping.scala",
+      "region": "whole file (Parent/Child mapping with Join(List((k1,p1),(k2,p2))))",
+      "whatItShows": "Composite-key join via a two-element Join condition list with two key fields."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlInterfacesMapping.scala",
+      "region": "typeMappings + entityTypeDiscriminator (lines ~108-213)",
+      "whatItShows": "SqlInterfaceMapping with a discriminator column, subtype ObjectMappings on the shared table, narrowPredicate/discriminate, plus a CursorField overriding an interface field."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlUnionsMapping.scala",
+      "region": "whole file (SqlUnionMapping + itemTypeDiscriminator)",
+      "whatItShows": "Union mapping with hidden key + hidden discriminator and per-member column mappings on one table."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlJsonbMapping.scala",
+      "region": "records TableDef + RowType ObjectMapping with SqlJson; schema with nested Record/Choice/Child types",
+      "whatItShows": "Mapping a jsonb column with SqlJson, including nested objects, enums, arrays and an interface inside JSON."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlTestMapping.scala",
+      "region": "whole file (abstract codec surface + col)",
+      "whatItShows": "The full abstract codec vocabulary (bool/text/int4/int8/float4/numeric/uuid/jsonb/nullable/list) and the generic `col` helper."
+    },
+    {
+      "file": "modules/doobie-core/src/test/scala/DoobieDatabaseSuite.scala",
+      "region": "DoobieTestMapping (lines 28-57)",
+      "whatItShows": "Concrete doobie codec instances (TestCodec = (Meta[T], Boolean)) and nullable/list implementations."
+    },
+    {
+      "file": "modules/skunk/js-jvm/src/test/scala/SkunkDatabaseSuite.scala",
+      "region": "SkunkTestMapping (lines 61-100)",
+      "whatItShows": "Concrete skunk codec instances (TestCodec = (skunk.Codec[T], Boolean)), jsonb via skunk-circe, nullable via .opt, array via SCodec.array."
+    },
+    {
+      "file": "demo/src/main/scala/demo/world/WorldMapping.scala",
+      "region": "whole file with #db_tables / #schema / #root / #type_mappings / #elaborator mdoc tags",
+      "whatItShows": "A complete runnable doobie/postgres mapping (already tagged for snipping) showing TableDef with Meta codecs, TypeMappings(...) form, joins, associative key, and an elaborator."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlCompositeKeySuite.scala",
+      "region": "test(\"root query\") query + expected JSON (lines 28-99)",
+      "whatItShows": "A ready-to-snip GraphQL query and its expected JSON response for the composite-key mapping."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlUnionSuite.scala",
+      "region": "tests 'simple union query' and 'union query with introspection' (lines 28-98)",
+      "whatItShows": "GraphQL inline-fragment queries against a union and their expected JSON, including __typename."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlJsonbSuite.scala",
+      "region": "tests for objects/arrays/fragments/introspection (lines 108-296)",
+      "whatItShows": "Queries that descend into a jsonb sub-tree (nested objects, arrays, inline fragments, __typename) with expected JSON."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "SqlMapping field-mapping reference",
+      "diataxisType": "reference",
+      "outline": [
+        "SqlField and its flags (key, hidden, discriminator, associative)",
+        "SqlObject and embedding vs joining semantics",
+        "SqlJson and jsonb sub-tree resolution",
+        "Join: single-pair, composite (List), and chained multi-Join forms",
+        "ColumnRef, TableDef, RootDef, TableName and the col helper",
+        "SqlInterfaceMapping / SqlUnionMapping / SqlDiscriminator constructors and arities",
+        "Backend col signatures: doobie (Meta + nullable) vs skunk (Codec + Option-inferred)"
+      ]
+    },
+    {
+      "title": "How to model relationships in SQL mappings",
+      "diataxisType": "how-to",
+      "outline": [
+        "Map a one-to-many join (Country -> cities)",
+        "Map a many-to-one join (City -> country)",
+        "Embed a value object on the parent row (Film -> synopses)",
+        "Reuse a shared embedded type across parents with PrefixedMapping",
+        "Join on a composite key",
+        "Chain a join through an associative table with multiple Joins"
+      ]
+    },
+    {
+      "title": "How to map interfaces and unions to SQL",
+      "diataxisType": "how-to",
+      "outline": [
+        "Single-table interface mapping with a discriminator column",
+        "Writing an SqlDiscriminator (discriminate + narrowPredicate)",
+        "Adding subtype-specific columns via subtype ObjectMappings",
+        "Union mapping rules: hidden key + hidden discriminator, per-member columns",
+        "Querying with inline fragments and __typename",
+        "Validation errors to expect (split tables, missing discriminator, non-hidden union fields)"
+      ]
+    },
+    {
+      "title": "How to map jsonb columns with SqlJson",
+      "diataxisType": "how-to",
+      "outline": [
+        "Declare a jsonb column codec (doobie vs skunk)",
+        "Map a jsonb column with SqlJson to a GraphQL object",
+        "Nested objects, enums and arrays inside JSON",
+        "Interface members and __typename inside JSON",
+        "Nullable vs non-null SqlJson fields and the 'expected jsonb value' error",
+        "Limitations: no SQL joins/filters/ordering inside the JSON sub-tree"
+      ]
+    },
+    {
+      "title": "Understanding how Grackle compiles SQL mappings",
+      "diataxisType": "explanation",
+      "outline": [
+        "Keys and row assembly: why every object mapping needs a key",
+        "Embedding vs joining: same-row vs separate-table sub-objects",
+        "How interfaces/unions share a table and are narrowed by discriminators",
+        "Hidden columns and why join/key/discriminator columns are usually hidden",
+        "FailedJoin sentinel and outer-join semantics",
+        "The validator: the consistency rules it enforces and how to read its errors",
+        "Doobie vs Skunk: the Codec/Encoder/Fragment abstraction boundary"
+      ]
+    }
+  ]
+}

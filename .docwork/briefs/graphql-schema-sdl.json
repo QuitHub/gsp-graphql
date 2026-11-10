@@ -1,0 +1,385 @@
+{
+  "subsystem": "GraphQL Schema & SDL",
+  "summary": "This subsystem defines how GraphQL schemas are represented in Grackle and how they are built from SDL text. A `Schema` is an immutable collection of `NamedType` declarations (`ScalarType`, `EnumType`, `InterfaceType`, `ObjectType`, `UnionType`, `InputObjectType`) plus directive definitions and extensions, with nullability and lists modelled by the `NullableType`/`ListType` wrappers and by-name references modelled by `TypeRef`. Schemas are normally constructed via the compile-time-validated `schema\"...\"` string interpolator (or the runtime `Schema(text): Result[Schema]` factory), which parse SDL into an `Ast.Document` (`GraphQLParser`), build the typed model (`SchemaParser`), and run an extensive battery of structural checks (`SchemaValidator`). The model is the ground truth used by mappings and elaborators: types are compared with `=:=`/`<:<` and referenced by name through `schema.ref(...)` so that `TypeRef`s support mutual recursion and value-equality. The subsystem also covers custom scalars, schema directives (definition, validation, the built-ins `@skip`/`@include`/`@deprecated`/`@specifiedBy`/`@oneOf`), type extensions (`extend ...`), and rendering a `Schema` back to SDL via `SchemaRenderer` (used by `Schema.toString`).",
+  "keyConcepts": [
+    {
+      "name": "schema\"...\" string interpolator",
+      "explanation": "The idiomatic way to define a schema. Defined in version-specific syntax files (scala-2/syntax2.scala via Scala 2 macros, scala-3/syntax3.scala via the typelevel `Literally` macro) and surfaced through `import grackle.syntax._`. It parses and fully validates the SDL at COMPILE time; an invalid schema is a compile error (message prefixed with `Invalid schema:` and 🐞 bullets). It expands to `Schema(s, CompiletimeParsers.schemaParser).toOption.get`, so it yields a bare `Schema`, not a `Result[Schema]`."
+    },
+    {
+      "name": "Schema(text): Result[Schema]",
+      "explanation": "The runtime factory in `object Schema`. Unlike the interpolator it returns a `Result[Schema]` (success or accumulated validation `Problem`s), so it is what you use when the SDL is not known at compile time or when you want to inspect validation errors. `Schema.apply` takes an implicit `SourcePos`."
+    },
+    {
+      "name": "Type vs NamedType",
+      "explanation": "`Type` is the root sealed trait for every GraphQL type. `NamedType` is the subset with a schema-defined `name` (`ScalarType`, `EnumType`, `InterfaceType`, `ObjectType`, `UnionType`, `InputObjectType`, plus `TypeRef`). `ListType` and `NullableType` are unnamed type *modifiers* that wrap another `Type`."
+    },
+    {
+      "name": "Nullability is inverted vs SDL",
+      "explanation": "In Grackle's model, types are non-null by DEFAULT (a bare `ScalarType`/`TypeRef` is already non-null). Optionality is represented by explicitly wrapping in `NullableType`. This is the OPPOSITE of GraphQL SDL where `String` is nullable and `String!` is non-null. The parser (`SchemaParser.mkType`) therefore wraps every non-`!` type in `NullableType`. Use `.nullable`, `.nonNull`, `.isNullable` to manipulate."
+    },
+    {
+      "name": "Lists via ListType",
+      "explanation": "A GraphQL `[T]` becomes `NullableType(ListType(NullableType(T)))` for the fully-nullable case (list nullable, elements nullable). `[T!]!` becomes `ListType(T)`. `.list`, `.item`, `.isList` operate on this. The parser limits list nesting depth to `maxListTypeDepth` (default 5)."
+    },
+    {
+      "name": "TypeRef and by-name references",
+      "explanation": "`TypeRef(schema, name)` is a lazy, by-name reference to a type defined in a schema. It is how mutually recursive types are expressed and, crucially, the ONLY type representation that can be meaningfully compared with `==`. Obtain a checked ref with `schema.ref(name)` (throws `IllegalArgumentException` if undefined) or an unchecked one with `schema.uncheckedRef(name)`. `.dealias` resolves a `TypeRef` to its target; `.exists` reports whether the target is defined."
+    },
+    {
+      "name": "=:= / <:< / dealias",
+      "explanation": "`a =:= b` is type equivalence that sees through aliases/TypeRefs (preferred over `==`). `a <:< b` is the subtype relation (object<:<implemented interface, member<:<union, list/nullable covariance). `.dealias` strips TypeRef aliasing. `.nominal_=:=` compares by underlying name."
+    },
+    {
+      "name": "Custom scalars",
+      "explanation": "Declared in SDL with `scalar Name` (optionally `@specifiedBy(url: ...)`). They produce a `ScalarType` with `isBuiltIn == false`. The schema layer only records the scalar's name; how its values are encoded/decoded is supplied elsewhere via `LeafMapping[A]` plus `Value` extractors in the mapping/elaborator. `Value.checkValue`/`checkVarValue` pass primitives and enum values through unchanged for non-built-in scalars."
+    },
+    {
+      "name": "Schema directives & DirectiveDef",
+      "explanation": "Custom directives are declared in SDL with `directive @name(args) [repeatable] on LOC1 | LOC2` producing a `DirectiveDef`. Applied occurrences are `Directive(name, args)`. The five built-ins (`@skip`, `@include`, `@deprecated`, `@specifiedBy`, `@oneOf`) are always appended (`DirectiveDef.builtIns`). `Directive.validateDirectivesForSchema` checks every applied directive against its definition's locations, repeatability and argument types. `@deprecated`/`@specifiedBy`/`@oneOf` have first-class accessors (`isDeprecated`, `specifiedByURL`, `isOneOf`)."
+    },
+    {
+      "name": "Schema validation (SchemaValidator)",
+      "explanation": "On construction the parser runs `SchemaValidator.validateSchema`, accumulating `Problem`s for: references to undefined types, duplicate type/field/enum-value definitions, non-object or duplicate union members, interface implementation conformance (missing fields, wrong field subtype, mismatched args), transitive-interface obligations, interface cycles, type-extension target mismatches, and directive validity. All failures surface as `Result.Failure(NonEmptyChain[Problem])`."
+    },
+    {
+      "name": "Root operation types & schemaType",
+      "explanation": "If no explicit `schema { query mutation subscription }` block is present, Grackle synthesises a default schema type referencing types named `Query`, `Mutation`, `Subscription` (only those that exist). `schema.queryType` is non-optional and will throw `NoSuchElementException` if there is no query root. `mutationType`/`subscriptionType` are `Option`."
+    },
+    {
+      "name": "Type extensions",
+      "explanation": "`extend type/interface/union/enum/input/scalar/schema ...` parse into `TypeExtension`/`SchemaExtension` values stored separately on the schema; `schema.types` and `schema.schemaType` lazily merge extensions onto base types. Validated by `validateTypeExtensions` (e.g. cannot apply an Object extension to a non-object, cannot extend a non-existent type)."
+    },
+    {
+      "name": "Ast layer",
+      "explanation": "`grackle.Ast` is the untyped parse tree (`Document = List[Definition]`, `TypeDefinition`, `FieldDefinition`, `Ast.Type.{Named,List,NonNull}`, `Ast.Value`, `DirectiveLocation`, etc.). `GraphQLParser.parseText` produces an `Ast.Document`; `SchemaParser.parseDocument` lowers it into the typed `Schema` model. The `doc\"...\"` interpolator yields a raw `Ast.Document`."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Schema",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "trait Schema { def pos: SourcePos; def baseTypes: List[NamedType]; lazy val types: List[NamedType]; def directives: List[DirectiveDef]; def schemaExtensions: List[SchemaExtension]; def typeExtensions: List[TypeExtension]; def ref(tpnme: String): TypeRef; def uncheckedRef(tpnme: String): TypeRef; def uncheckedRef(tpe: NamedType): TypeRef; def definition(name: String): Option[NamedType]; def baseSchemaType: NamedType; lazy val schemaType: NamedType; def queryType: NamedType; def mutationType: Option[NamedType]; def subscriptionType: Option[NamedType]; def isRootType(tpe: Type): Boolean; def implementations(it: InterfaceType): List[ObjectType]; def subtypes(tpe: NamedType): Set[NamedType] }",
+      "purpose": "The representation of a GraphQL schema: its types, directives and extensions, plus lookup/ref helpers used to wire up mappings and elaborators."
+    },
+    {
+      "name": "Schema (companion)",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "object Schema { def apply(schemaText: String)(implicit pos: SourcePos): Result[Schema]; def apply(schemaText: String, parser: SchemaParser)(implicit pos: SourcePos): Result[Schema] }",
+      "purpose": "Runtime factory that parses+validates SDL text into a Result[Schema]."
+    },
+    {
+      "name": "Type",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "sealed trait Type extends Product { def =:=(other: Type): Boolean; def <:<(other: Type): Boolean; def dealias: Type; def isNullable: Boolean; def nullable: Type; def nonNull: Type; def isList: Boolean; def item: Option[Type]; def list: Type; def underlying: Type; def underlyingObject: Option[NamedType]; def underlyingNamed: NamedType; def isLeaf: Boolean; def asNamed: Option[NamedType]; def field(fieldName: String): Option[Type]; def fieldInfo(fieldName: String): Option[Field]; def /(pathElement: String): Path; def directives: List[Directive] }",
+      "purpose": "Root of the type hierarchy; carries all nullability/list/path/subtyping navigation operators."
+    },
+    {
+      "name": "NamedType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "sealed trait NamedType extends Type { def name: String; override def dealias: NamedType = this; def description: Option[String]; def directives: List[Directive] }",
+      "purpose": "A type with a schema-defined name (scalars, enums, objects, interfaces, unions, input objects, and TypeRef)."
+    },
+    {
+      "name": "TypeRef",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class TypeRef private[grackle] (schema: Schema, name: String) extends NamedType { override lazy val dealias: NamedType = schema.definition(name).getOrElse(this); override lazy val exists: Boolean = schema.definition(name).isDefined }",
+      "purpose": "By-name reference to a type in a schema; only type form safely comparable with ==, enabling mutual recursion. Constructor is private; obtain via schema.ref / schema.uncheckedRef."
+    },
+    {
+      "name": "ScalarType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class ScalarType(name: String, description: Option[String], directives: List[Directive]) extends Type with NamedType { def isBuiltIn: Boolean; def specifiedByURL: Option[String] }",
+      "purpose": "Represents scalar types (Int/Float/String/Boolean/ID and custom). object ScalarType exposes IntType, FloatType, StringType, BooleanType, IDType and builtIn(name)."
+    },
+    {
+      "name": "EnumType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class EnumType(name: String, description: Option[String], enumValues: List[EnumValueDefinition], directives: List[Directive]) extends Type with NamedType { def hasValue(name: String): Boolean; def value(name: String): Option[EnumValue]; def valueDefinition(name: String): Option[EnumValueDefinition] }",
+      "purpose": "An enum type with its defined values."
+    },
+    {
+      "name": "EnumValueDefinition",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class EnumValueDefinition(name: String, description: Option[String], directives: List[Directive]) extends Deprecatable",
+      "purpose": "One value of an enum; supports @deprecated via the Deprecatable mixin (isDeprecated, deprecationReason)."
+    },
+    {
+      "name": "InterfaceType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class InterfaceType(name: String, description: Option[String], fields: List[Field], interfaces: List[NamedType], directives: List[Directive]) extends TypeWithFields",
+      "purpose": "Abstract type declaring common fields; may itself implement other interfaces."
+    },
+    {
+      "name": "ObjectType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class ObjectType(name: String, description: Option[String], fields: List[Field], interfaces: List[NamedType], directives: List[Directive]) extends TypeWithFields",
+      "purpose": "Concrete object type with fields and implemented interfaces."
+    },
+    {
+      "name": "UnionType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class UnionType(name: String, description: Option[String], members: List[NamedType], directives: List[Directive]) extends Type with NamedType",
+      "purpose": "Union of object types; members must be object types (validated)."
+    },
+    {
+      "name": "InputObjectType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class InputObjectType(name: String, description: Option[String], inputFields: List[InputValue], directives: List[Directive]) extends Type with NamedType { def inputFieldInfo(name: String): Option[InputValue]; def isOneOf: Boolean }",
+      "purpose": "Composite input type; isOneOf reflects the @oneOf directive."
+    },
+    {
+      "name": "ListType / NullableType",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class ListType(ofType: Type) extends Type; case class NullableType(ofType: Type) extends Type",
+      "purpose": "Unnamed type modifiers. NullableType marks optionality (types are non-null by default in Grackle's model); ListType wraps element types."
+    },
+    {
+      "name": "Field",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class Field(name: String, description: Option[String], args: List[InputValue], tpe: Type, directives: List[Directive]) extends Deprecatable",
+      "purpose": "A field of an object/interface type, with arguments, result type and directives."
+    },
+    {
+      "name": "InputValue",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class InputValue(name: String, description: Option[String], tpe: Type, defaultValue: Option[Value], directives: List[Directive]) extends Deprecatable",
+      "purpose": "A field argument or input-object field, with optional default (a Value)."
+    },
+    {
+      "name": "DirectiveDef",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class DirectiveDef(name: String, description: Option[String], args: List[InputValue], isRepeatable: Boolean, locations: List[DirectiveLocation]); object DirectiveDef { val Skip; val Include; val Deprecated; val SpecifiedBy; val OneOf; val builtIns: List[DirectiveDef] }",
+      "purpose": "A directive declaration. object DirectiveDef holds the five built-ins that are always added to every parsed schema."
+    },
+    {
+      "name": "Directive",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "case class Directive(name: String, args: List[Binding]); object Directive { def fromAst(d: Ast.Directive): Result[Directive]; def validateDirectivesForSchema(schema: Schema): List[Problem]; def validateDirectives(schema: Schema, location: Ast.DirectiveLocation, directives: List[Directive], vars: Vars): List[Problem] }",
+      "purpose": "An applied directive occurrence plus the validation entry points."
+    },
+    {
+      "name": "SchemaParser",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "trait SchemaParser { def parseText(text: String)(implicit pos: SourcePos): Result[Schema]; def parseDocument(doc: Ast.Document)(implicit sourcePos: SourcePos): Result[Schema] }; object SchemaParser { def apply(parser: GraphQLParser): SchemaParser }",
+      "purpose": "Lowers SDL text or an Ast.Document into a validated typed Schema."
+    },
+    {
+      "name": "GraphQLParser",
+      "file": "modules/core/src/main/scala/parser.scala",
+      "signature": "trait GraphQLParser { def parseText(text: String): Result[Ast.Document] }; object GraphQLParser { case class Config(maxSelectionDepth: Int, maxSelectionWidth: Int, maxInputValueDepth: Int, maxListTypeDepth: Int, terseError: Boolean); val defaultConfig: Config; def apply(config: Config): GraphQLParser }",
+      "purpose": "The SDL/query parser (cats-parse based). Config bounds parse depth/width; defaultConfig is depth 100 / width 1000 / inputValueDepth 5 / listTypeDepth 5 / terseError true."
+    },
+    {
+      "name": "SchemaValidator",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "object SchemaValidator { def validateSchema(schema: Schema, defns: List[Ast.TypeDefinition], typeExtnDefns: List[Ast.TypeExtension]): List[Problem]; def validateReferences(...); def validateUniqueDefns(...); def validateUniqueFields(...); def validateUnionMembers(...); def validateUniqueEnumValues(...); def validateInterfaces(...); def validateImplementations(...); def validateTypeExtensions(...) }",
+      "purpose": "All structural schema checks; run automatically by SchemaParser.parseDocument."
+    },
+    {
+      "name": "SchemaRenderer",
+      "file": "modules/core/src/main/scala/schema.scala",
+      "signature": "object SchemaRenderer { def renderSchema(schema: Schema): String; def renderType(tpe: Type): String; def renderTypeDefn(tpe: NamedType): String; def renderDirective(d: Directive): String; def renderValue(value: Value): String }",
+      "purpose": "Renders a Schema (and its parts) back to SDL. Schema.toString delegates to renderSchema."
+    },
+    {
+      "name": "Ast.DirectiveLocation",
+      "file": "modules/core/src/main/scala/ast.scala",
+      "signature": "sealed trait DirectiveLocation; object DirectiveLocation { QUERY, MUTATION, SUBSCRIPTION, FIELD, FRAGMENT_DEFINITION, FRAGMENT_SPREAD, INLINE_FRAGMENT, VARIABLE_DEFINITION, SCHEMA, SCALAR, OBJECT, FIELD_DEFINITION, ARGUMENT_DEFINITION, INTERFACE, UNION, ENUM, ENUM_VALUE, INPUT_OBJECT, INPUT_FIELD_DEFINITION }",
+      "purpose": "The complete set of locations a directive may be declared `on`."
+    },
+    {
+      "name": "VersionSpecificSyntax (schema/doc interpolators)",
+      "file": "modules/core/src/main/scala-3/syntax3.scala",
+      "signature": "extension (inline ctx: StringContext) inline def schema(inline args: Any*): Schema; inline def doc(inline args: Any*): Document   // Scala 3. Scala 2 equivalent in scala-2/syntax2.scala: def schema(args: Any*): Schema = macro SchemaLiteral.make",
+      "purpose": "Compile-time-validated string interpolators. `schema\"...\"` yields a bare Schema (compile error if invalid); `doc\"...\"` yields an Ast.Document."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Define a schema with the compile-time-validated interpolator",
+      "code": "import grackle.Schema\nimport grackle.syntax._\n\nval schema: Schema =\n  schema\"\"\"\n    type Query {\n      hero(episode: Episode!): Character!\n      character(id: ID!): Character\n    }\n    enum Episode {\n      NEWHOPE\n      EMPIRE\n      JEDI\n    }\n    interface Character {\n      id: String!\n      name: String\n      friends: [Character!]\n      appearsIn: [Episode!]\n    }\n    type Human implements Character {\n      id: String!\n      name: String\n      friends: [Character!]\n      appearsIn: [Episode!]\n      homePlanet: String\n    }\n  \"\"\"\n\nval QueryType     = schema.ref(\"Query\")\nval CharacterType = schema.ref(\"Character\")",
+      "explanation": "Canonical pattern (verbatim from the StarWars demo). The schema text is parsed and fully validated AT COMPILE TIME; an invalid schema fails compilation. `schema.ref(name)` returns a TypeRef for use in mappings/elaborators and is safe to compare with ==. Requires `import grackle.syntax._`.",
+      "needsDb": false
+    },
+    {
+      "title": "Parse a schema at runtime and inspect validation Problems",
+      "code": "import grackle.{Result, Schema}\n\nval schema: Result[Schema] =\n  Schema(\n    \"\"\"\n      type Query {\n        episodeById(id: String!): Episod\n      }\n      type Episode {\n        id: String!\n      }\n    \"\"\"\n  )\n\nschema match {\n  case Result.Failure(ps) =>\n    // NonEmptyChain(\"Reference to undefined type 'Episod'\")\n    ps.map(_.message)\n  case Result.Success(s) =>\n    s.types.map(_.name)\n  case _ => ???\n}",
+      "explanation": "When SDL is not statically known, use `Schema(text): Result[Schema]`. Validation errors are accumulated as Problems (here the typo 'Episod' is flagged). Adapted directly from SchemaSuite 'undefined types' tests.",
+      "needsDb": false
+    },
+    {
+      "title": "Custom scalars and an enum in a schema",
+      "code": "import grackle.syntax._\n\nval schema =\n  schema\"\"\"\n    type Query {\n      movieById(id: UUID!): Movie\n      moviesByGenre(genre: Genre!): [Movie!]!\n    }\n    scalar UUID\n    scalar Date\n    enum Genre {\n      DRAMA\n      ACTION\n      COMEDY\n    }\n    type Movie {\n      id: UUID!\n      title: String!\n      genre: Genre!\n      releaseDate: Date!\n    }\n  \"\"\"\n\nval UUIDType = schema.ref(\"UUID\")   // a ScalarType, isBuiltIn == false",
+      "explanation": "Custom scalars are declared with `scalar Name`; the schema layer only records the name. Encoding/decoding is supplied separately in the mapping via LeafMapping[A] plus Value extractors (see ScalarsSuite MovieMapping). Derived from ScalarsSuite.",
+      "needsDb": false
+    },
+    {
+      "title": "Custom scalar with @specifiedBy directive",
+      "code": "import grackle.{Result, ScalarType, Schema}\n\nval schema = Schema(\n  \"\"\"\n    scalar UUID @specifiedBy(url: \"https://tools.ietf.org/html/rfc4122\")\n    type Query {\n      user(id: UUID!): UUID\n    }\n  \"\"\"\n)\n\nschema match {\n  case Result.Success(s) =>\n    val uuid = s.baseTypes.find(_.name == \"UUID\").get.asInstanceOf[ScalarType]\n    uuid.specifiedByURL  // Some(\"https://tools.ietf.org/html/rfc4122\")\n  case _ => ???\n}",
+      "explanation": "The built-in @specifiedBy directive on a custom scalar is surfaced via ScalarType.specifiedByURL. Verbatim behaviour from SchemaSuite 'scalar with specifiedBy directive'. Omitting the required url argument fails validation with 'Value of type String required for url in directive specifiedBy'.",
+      "needsDb": false
+    },
+    {
+      "title": "Define and apply a custom schema directive",
+      "code": "import grackle.syntax._\n\nval schema =\n  schema\"\"\"\n    type Query {\n      products: [String!]!\n      user: User! @authenticated\n    }\n    type User {\n      name: String!\n      email: String! @hasRole(requires: ADMIN)\n    }\n    directive @authenticated on FIELD_DEFINITION | OBJECT\n    directive @hasRole(requires: Role = ADMIN) on FIELD_DEFINITION | OBJECT\n    enum Role {\n      ADMIN\n      USER\n    }\n  \"\"\"\n\n// Read applied directives off the model:\nval emailDirs =\n  schema.ref(\"User\").dealias.fieldInfo(\"email\").get.directives\n  // List(Directive(\"hasRole\", List(Binding(\"requires\", EnumValue(\"ADMIN\")))))",
+      "explanation": "Directives are declared with `directive @name(args) on LOCATIONS` and applied with `@name(...)`. Applied directives become `Directive(name, args)` on the relevant Field/type and are validated against their DirectiveDef (location, repeatability, arg types). Adapted from SchemaDirectivesSuite.",
+      "needsDb": false
+    },
+    {
+      "title": "Inspect nullability, lists and references on a type",
+      "code": "import grackle.syntax._\n\nval schema =\n  schema\"\"\"\n    type Query { posts: [Post] }\n    type Post  { id: Int!  title: String }\n  \"\"\"\n\nval PostType = schema.ref(\"Post\")\n\nPostType.field(\"id\").get.isNullable      // false  (Int!)\nPostType.field(\"title\").get.isNullable   // true   (String)\nschema.ref(\"Query\").field(\"posts\").get.isList  // true (after stripping outer nullable)\nPostType =:= schema.ref(\"Post\")          // true (alias-aware equivalence)",
+      "explanation": "Demonstrates that in Grackle's model bare types are non-null and optional ones are wrapped in NullableType (opposite of SDL surface syntax). `=:=` is the alias-aware equivalence to prefer over ==. Derived from SchemaSuite / SDLSuite parse examples.",
+      "needsDb": false
+    },
+    {
+      "title": "Round-trip SDL via Schema.toString",
+      "code": "import grackle.{GraphQLParser, SchemaParser}\nimport grackle.syntax._\n\nval parser       = GraphQLParser(GraphQLParser.defaultConfig)\nval schemaParser = SchemaParser(parser)\n\nval sdl =\n  \"\"\"|type Query {\n     |  posts: [Post]\n     |  author(id: Int! = 23): Author\n     |}\n     |type Post {\n     |  id: Int!\n     |  title: String\n     |}\n     |type Author {\n     |  id: Int!\n     |}\"\"\".stripMargin\n\nval rendered = schemaParser.parseText(sdl).map(_.toString)\n// rendered == sdl.success",
+      "explanation": "SchemaParser parses SDL to a Schema; Schema.toString (SchemaRenderer.renderSchema) renders it back to SDL. Built-in directive definitions are omitted from the rendering. Verbatim shape from SDLSuite 'deserialize schema' tests.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "Nullability is INVERTED relative to SDL. In Grackle's in-memory model types are non-null by default and optionality is an explicit NullableType wrapper. So SDL `String` parses to `NullableType(StringType)` and `String!` parses to `StringType`. Anyone reading the model expecting `!`-style semantics will get it backwards.",
+    "The `schema\"...\"` interpolator returns a bare `Schema`, NOT a `Result[Schema]` - it expands to `Schema(s, ...).toOption.get`. Validation happens at compile time, so a bad schema is a COMPILE error. Use the runtime `Schema(text): Result[Schema]` when you need to handle/inspect validation Problems at runtime.",
+    "`schema.queryType` is non-optional and calls `.get`; if the schema has no query root type it throws `NoSuchElementException` (SchemaSuite: `intercept[NoSuchElementException](schema\"scalar Foo\".queryType)`). `mutationType`/`subscriptionType` are safe Options.",
+    "Compare types with `=:=` (alias-aware) not `==`. Plain `==` distinguishes a type from a `TypeRef` alias to it, which is almost never what you want. Exception: `TypeRef`s obtained from the SAME schema via `schema.ref` ARE designed to be `==`-comparable - that is their whole purpose for use in elaborator pattern matches.",
+    "`schema.ref(name)` throws IllegalArgumentException if the name is not defined in the schema; `schema.uncheckedRef(name)` does NOT check (it can produce a dangling TypeRef whose `.exists` is false and whose navigation methods return None/false - see SchemaSuite 'operations on undefined types').",
+    "`TypeRef`'s case-class constructor is `private[grackle]`; you cannot `new TypeRef(...)` from user code. Always go through `schema.ref` / `schema.uncheckedRef`.",
+    "Every parsed schema silently gets the five built-in directive definitions appended (DirectiveDef.builtIns: skip, include, deprecated, specifiedBy, oneOf). SchemaRenderer deliberately omits these from `toString`, so a round-tripped schema will not show them even though `schema.directives` contains them.",
+    "Object/interface/union/enum/input types must be non-empty: an object/interface with zero fields, a union with zero members, an enum with zero values, or an input object with zero fields is a parse failure (e.g. 'object type X must define at least one field').",
+    "Custom scalar names are case-sensitive and references are validated: a typo like using `Long` without declaring `scalar Long`, or `CCid` vs declared `CCId`, produces 'Reference to undefined type ...'. The five built-in scalar names (Int/Float/String/Boolean/ID) are always available without declaration; re-declaring them via `scalar Int` etc. is accepted and maps to the built-in.",
+    "`@oneOf` input objects may not have any non-nullable fields - declaring one fails at parse time with 'oneOf input object type X may not have non-nullable field(s): ...'. At value-checking time, exactly one member must be supplied and it must be non-null (Value.checkValue enforces this).",
+    "A type that implements an interface must ALSO directly declare every interface that interface transitively implements, otherwise you get 'Type X does not directly implement transitively implemented interface Y'. Interface implementation also checks field presence, that the implementing field type is a `<:<` subtype, and that argument lists match exactly (by name and type, via `==` not `<:<`).",
+    "Interface implements-cycles are rejected ('Interface cycle starting from ...'); union members must be object types ('Non-object type ... included in union ...').",
+    "The schema/custom-scalar model only records the scalar's NAME. It does not know how to serialise/parse the scalar - that lives in the mapping layer (LeafMapping[A] + Value extractor objects). Defining `scalar UUID` alone does nothing at runtime until a LeafMapping and the relevant Value pattern-matching are provided (see ScalarsSuite MovieMapping).",
+    "GraphQLParser.defaultConfig imposes limits: maxSelectionDepth=100, maxSelectionWidth=1000, maxInputValueDepth=5, maxListTypeDepth=5. Deeply nested list type modifiers in SDL (beyond 5) or very large queries will be rejected by the parser unless you supply a custom Config."
+  ],
+  "snipSources": [
+    {
+      "file": "demo/src/main/scala/demo/starwars/StarWarsMapping.scala",
+      "region": "#schema tag (lines 31-66): `val schema = schema\"\"\"...\"\"\"`",
+      "whatItShows": "Canonical schema-interpolator definition with Query root, an enum, an interface and two implementing object types. Already used by the docs via the `#schema` snip tag."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/ScalarsSuite.scala",
+      "region": "object MovieMapping.schema (lines 184-213) plus LeafMapping list (lines 224-255) and Value extractor objects (lines 257-285)",
+      "whatItShows": "Custom scalars (UUID, Time, Date, DateTime, Interval) and a custom enum declared in SDL, then wired to JVM types via LeafMapping and Value extractors. Compiling end-to-end example of how the scalar/enum schema surface connects to mappings."
+    },
+    {
+      "file": "modules/core/src/test/scala/sdl/SDLSuite.scala",
+      "region": "Whole file (lines 30-468): per-construct parse tests and 'deserialize schema (1/2/3)' / 'round-trip extensions' tests",
+      "whatItShows": "Exact Ast representation of every SDL construct (scalar/object/interface/union/enum/input/directive definitions and all extension forms), and SDL->Schema->SDL round-tripping including default values and @deprecated."
+    },
+    {
+      "file": "modules/core/src/test/scala/schema/SchemaSuite.scala",
+      "region": "Whole file (lines 25-757)",
+      "whatItShows": "Every schema-validation error path (undefined refs, duplicates, interface conformance/cycles, transitive interfaces, non-interface implements, specifiedBy, oneOf) with exact Problem messages, plus explicit/implicit/partial schema-root-type cases and TypeRef navigation on undefined types."
+    },
+    {
+      "file": "modules/core/src/test/scala/directives/SchemaDirectivesSuite.scala",
+      "region": "schema definition with @authenticated / @hasRole directives (around lines 340-372) and the directive-reading elaborator (lines 404-455)",
+      "whatItShows": "Defining custom schema directives (`directive @name(...) on FIELD_DEFINITION | OBJECT`), applying them to fields/types, and reading the resulting Directive values off the model (c.tpe.directives, fieldInfo(name).directives)."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/DirectivesSuite.scala",
+      "region": "Lines 43-160: Schema(...) blocks declaring `directive @foo ... on FIELD`, repeatable, and with args",
+      "whatItShows": "Minimal directive-definition variants (no args, with required/optional args, repeatable, multiple locations) suitable for a directives reference page."
+    },
+    {
+      "file": "modules/core/src/main/scala/schema.scala",
+      "region": "object SchemaRenderer (lines 2283-2531)",
+      "whatItShows": "Authoritative mapping from each model type back to SDL syntax - useful as a reference table for how each NamedType/modifier/directive renders."
+    },
+    {
+      "file": "modules/core/src/main/scala/ast.scala",
+      "region": "Whole file (lines 18-273)",
+      "whatItShows": "The complete untyped AST including Ast.Type.{Named,List,NonNull}, every *TypeDefinition / *TypeExtension, and the full DirectiveLocation enumeration - the reference for what SDL parses into."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Defining a GraphQL Schema in Grackle",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Add the import: `import grackle.syntax._`",
+        "Write your first schema with the `schema\"...\"` interpolator",
+        "Add a Query root type and fields",
+        "Add an enum, an interface, and an object that implements it",
+        "Obtain TypeRefs with schema.ref for later use in mappings",
+        "What 'validated at compile time' means (introduce a deliberate typo and see the compile error)"
+      ]
+    },
+    {
+      "title": "The Schema model: types, nullability and references",
+      "diataxisType": "reference",
+      "outline": [
+        "Schema trait: types, baseTypes, directives, ref/uncheckedRef, definition, queryType/mutationType/subscriptionType, schemaType, implementations, subtypes",
+        "NamedType hierarchy: ScalarType, EnumType, InterfaceType, ObjectType, UnionType, InputObjectType, TypeRef",
+        "Type modifiers: ListType and NullableType (and the non-null-by-default convention)",
+        "Field, InputValue, EnumValueDefinition",
+        "Type operators: =:=, <:<, dealias, nullable/nonNull/isNullable, list/item/isList, underlying*, field/fieldInfo, path*",
+        "DirectiveDef, Directive, DirectiveDef.builtIns and Ast.DirectiveLocation",
+        "Schema.apply / SchemaParser / GraphQLParser.Config",
+        "SchemaRenderer (Schema.toString)"
+      ]
+    },
+    {
+      "title": "How to parse SDL at runtime and handle validation errors",
+      "diataxisType": "how-to",
+      "outline": [
+        "Use Schema(text): Result[Schema] when SDL is dynamic",
+        "Pattern-match Result.Success / Result.Failure(NonEmptyChain[Problem])",
+        "Reading Problem messages",
+        "Building a GraphQLParser/SchemaParser explicitly and tuning Config limits",
+        "parseDocument for an already-parsed Ast.Document",
+        "Round-tripping a schema back to SDL with toString"
+      ]
+    },
+    {
+      "title": "How to define custom scalars and enums",
+      "diataxisType": "how-to",
+      "outline": [
+        "Declare `scalar Name` and `enum Name { ... }` in SDL",
+        "Why the schema only records the name (separation from encoding)",
+        "Wire a scalar to a JVM type with LeafMapping and Value extractors (cross-reference to mappings)",
+        "Use @specifiedBy and read it via ScalarType.specifiedByURL",
+        "Mapping enum values (SDL value names vs domain ADT)"
+      ]
+    },
+    {
+      "title": "How to define and use schema directives",
+      "diataxisType": "how-to",
+      "outline": [
+        "Declare a directive: `directive @name(args) [repeatable] on LOCATIONS`",
+        "The full list of DirectiveLocation values",
+        "Applying directives to types/fields/enum values",
+        "Reading applied Directive values off the model (type.directives, fieldInfo.directives)",
+        "Built-in directives: @skip, @include, @deprecated, @specifiedBy, @oneOf and their accessors (isDeprecated, deprecationReason, specifiedByURL, isOneOf)",
+        "How directive arguments/locations/repeatability are validated"
+      ]
+    },
+    {
+      "title": "Interfaces, unions, input objects and type extensions",
+      "diataxisType": "explanation",
+      "outline": [
+        "Interfaces and implementation rules (field presence, subtype conformance, matching arguments, transitive interfaces, cycle rejection)",
+        "Unions and the object-only member rule",
+        "Input objects, default values, and @oneOf semantics",
+        "Type extensions (extend type/interface/union/enum/input/scalar/schema) and how schema.types merges them",
+        "schemaType, default vs explicit `schema { ... }` block, and root operation types"
+      ]
+    },
+    {
+      "title": "Nullability and lists in Grackle's type model",
+      "diataxisType": "explanation",
+      "outline": [
+        "Why Grackle inverts SDL nullability (non-null by default, NullableType for optional)",
+        "How `[T]`, `[T!]`, `[T!]!` map to ListType/NullableType nestings",
+        "The parser's wrapping logic and maxListTypeDepth",
+        "Navigation helpers that see through modifiers (underlying, underlyingObject, underlyingNamed, item, path, pathIsList, pathIsNullable)",
+        "Implications for writing mappings and elaborators"
+      ]
+    }
+  ]
+}

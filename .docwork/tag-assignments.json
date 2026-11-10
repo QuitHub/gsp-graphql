@@ -1,0 +1,546 @@
+[
+  {
+    "file": "modules/circe/src/test/scala/CirceData.scala",
+    "tags": [
+      {
+        "tag": "#circe_mapping",
+        "why": [
+          "[docs/how-to/circe-backend.md] TestCirceMapping: schema + constant CirceField('root', data) + LeafMapping + CursorField"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/circe/src/test/scala/CirceEffectData.scala",
+    "tags": [
+      {
+        "tag": "#circe_effects",
+        "why": [
+          "[docs/how-to/effects-batching.md] Root effects: computeCursor/computeJson/computeEncodable side by side",
+          "[docs/reference/circe-mapping.md] Effectful JSON roots: computeCursor/computeJson/computeEncodable"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/circe/src/test/scala/CircePrioritySuite.scala",
+    "tags": [
+      {
+        "tag": "#circe_priority",
+        "why": [
+          "[docs/how-to/circe-backend.md] CircePriorityMapping demonstrating opaque-subtree priority"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/main/scala/composedmapping.scala",
+    "tags": [
+      {
+        "tag": "#composed_base",
+        "why": [
+          "[docs/concepts/composition.md] ComposedMapping base class + ComposedCursor (small)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/main/scala/queryinterpreter.scala",
+    "tags": [
+      {
+        "tag": "#run_value",
+        "why": [
+          "[docs/concepts/query-interpreter.md] runValue dispatch table"
+        ]
+      },
+      {
+        "tag": "#complete_all",
+        "why": [
+          "[docs/concepts/effects-batching.md] completeAll gather/batch/scatter algorithm"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/main/scala/valuemapping.scala",
+    "tags": [
+      {
+        "tag": "#value_cursor",
+        "why": [
+          "[docs/concepts/mappings-cursors.md] ValueCursor reference implementation (asList/asNullable/preunique/narrow)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+    "tags": [
+      {
+        "tag": "#compile_simple",
+        "why": [
+          "[docs/concepts/compiler-elaboration.md] Before/after: GraphQL string -> Select(Unique(Filter(Eql(...)))) compiled algebra",
+          "[docs/reference/query-algebra.md] Parse a query string into the UntypedSelect/Binding algebra"
+        ]
+      },
+      {
+        "tag": "#compile_elaborated",
+        "why": [
+          "[docs/concepts/compiler-elaboration.md] Before/after: GraphQL string -> Select(Unique(Filter(Eql(...)))) compiled algebra"
+        ]
+      },
+      {
+        "tag": "#atomic_elaborator",
+        "why": [
+          "[docs/reference/elab-phases.md] SelectElaborator pattern matching args -> Elab.transformChild(Unique(Filter(...)))"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/EnvironmentSuite.scala",
+    "tags": [
+      {
+        "tag": "#env_mapping",
+        "why": [
+          "[docs/concepts/compiler-elaboration.md] EnvironmentMapping: Elab.env + CursorField reading cursor.env end-to-end"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/FragmentSuite.scala",
+    "tags": [
+      {
+        "tag": "#fragment_typed",
+        "why": [
+          "[docs/concepts/introspection-fragments-variables.md] Typed/inline fragment query compiling to Group/Narrow/Introspect"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/PreserveArgsElaborator.scala",
+    "tags": [
+      {
+        "tag": "#preserve_args",
+        "why": [
+          "[docs/reference/elab-phases.md] Low-level custom Phase overriding transform/select"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/ProblemSuite.scala",
+    "tags": [
+      {
+        "tag": "#problem_encoding",
+        "why": [
+          "[docs/reference/result-problem.md] Problem JSON encoding and toString worked examples"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/ScalarsSuite.scala",
+    "tags": [
+      {
+        "tag": "#scalars_schema",
+        "why": [
+          "[docs/how-to/custom-scalars-enums.md] ScalarsSuite MovieMapping: custom scalars/enum schema + LeafMapping list + Value extractors"
+        ]
+      },
+      {
+        "tag": "#scalars_leafmappings",
+        "why": [
+          "[docs/how-to/custom-scalars-enums.md] ScalarsSuite MovieMapping: custom scalars/enum schema + LeafMapping list + Value extractors",
+          "[docs/reference/mapping-types.md] LeafMapping list for custom scalars/enums"
+        ]
+      },
+      {
+        "tag": "#scalars_values",
+        "why": [
+          "[docs/how-to/custom-scalars-enums.md] ScalarsSuite MovieMapping: custom scalars/enum schema + LeafMapping list + Value extractors"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/compiler/SkipIncludeSuite.scala",
+    "tags": [
+      {
+        "tag": "#skip_include",
+        "why": [
+          "[docs/concepts/introspection-fragments-variables.md] @skip/@include with Boolean variables dropping subtrees"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/composed/ComposedData.scala",
+    "tags": [
+      {
+        "tag": "#composed_currency",
+        "why": [
+          "[docs/how-to/compose-mappings.md] Country/Currency value-mapping composition + countryCurrencyJoin",
+          "[docs/reference/mapping-types.md] Minimal ValueMapping skeleton (schema, refs, typeMappings, selectElaborator)"
+        ]
+      },
+      {
+        "tag": "#composed_country",
+        "why": [
+          "[docs/how-to/compose-mappings.md] Country/Currency value-mapping composition + countryCurrencyJoin"
+        ]
+      },
+      {
+        "tag": "#composed_mapping",
+        "why": [
+          "[docs/how-to/compose-mappings.md] Country/Currency value-mapping composition + countryCurrencyJoin"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/composed/ComposedListSuite.scala",
+    "tags": [
+      {
+        "tag": "#composed_list_join",
+        "why": [
+          "[docs/how-to/compose-mappings.md] List join via Group (collectionItemJoin)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala",
+    "tags": [
+      {
+        "tag": "#upper_mapping",
+        "why": [
+          "[docs/how-to/query-directives.md] QueryDirectivesMapping: @upperCase SDL + upperCaseElaborator Phase + compilerPhases override"
+        ]
+      },
+      {
+        "tag": "#upper_phase",
+        "why": [
+          "[docs/how-to/query-directives.md] QueryDirectivesMapping: @upperCase SDL + upperCaseElaborator Phase + compilerPhases override"
+        ]
+      },
+      {
+        "tag": "#upper_query",
+        "why": [
+          "[docs/how-to/query-directives.md] Query showing Warning (errors + data) when @upperCase is applied to a non-String field",
+          "[docs/how-to/errors.md] Field-level Warning surfaces as both data and errors"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/directives/SchemaDirectivesSuite.scala",
+    "tags": [
+      {
+        "tag": "#schema_directives",
+        "why": [
+          "[docs/how-to/schema-directives.md] @authenticated/@hasRole declarations + reading them off the model"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/mapping/MappingValidatorSuite.scala",
+    "tags": [
+      {
+        "tag": "#validator",
+        "why": [
+          "[docs/how-to/validate-mappings.md] MappingValidatorSuite: unchecked TypeMappings + each ValidationFailure triggered/matched"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/sdl/SDLSuite.scala",
+    "tags": [
+      {
+        "tag": "#sdl_roundtrip",
+        "why": [
+          "[docs/reference/schema-sdl.md] Round-trip SDL via SchemaParser/Schema.toString (deserialize schema test)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala",
+    "tags": [
+      {
+        "tag": "#subscription_mapping",
+        "why": [
+          "[docs/reference/effects.md] RootEffect/RootStream on one ValueMapping (get/put/watch)"
+        ]
+      },
+      {
+        "tag": "#run_ops",
+        "why": [
+          "[docs/reference/running-operations.md] Run a query and a mutation, then a subscription stream"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/generic/src/test/scala/DerivationSuite.scala",
+    "tags": [
+      {
+        "tag": "#cursor_primitive",
+        "why": [
+          "[docs/reference/cursor.md] Build a leaf cursor and render with asLeaf; field+asNullable+asLeaf; asList traversal; narrow"
+        ]
+      },
+      {
+        "tag": "#cursor_product",
+        "why": [
+          "[docs/reference/cursor.md] Build a leaf cursor and render with asLeaf; field+asNullable+asLeaf; asList traversal; narrow"
+        ]
+      },
+      {
+        "tag": "#cursor_list",
+        "why": [
+          "[docs/reference/cursor.md] Build a leaf cursor and render with asLeaf; field+asNullable+asLeaf; asList traversal; narrow"
+        ]
+      },
+      {
+        "tag": "#cursor_narrow",
+        "why": [
+          "[docs/reference/cursor.md] Build a leaf cursor and render with asLeaf; field+asNullable+asLeaf; asList traversal; narrow"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/generic/src/test/scala/RecursionSuite.scala",
+    "tags": [
+      {
+        "tag": "#recursion_data",
+        "why": [
+          "[docs/how-to/generic-derivation.md] Mutually recursive Programme/Production via transformField"
+        ]
+      },
+      {
+        "tag": "#recursion_mapping",
+        "why": [
+          "[docs/how-to/generic-derivation.md] Mutually recursive Programme/Production via transformField"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/generic/src/test/scala/ScalarsSuite.scala",
+    "tags": [
+      {
+        "tag": "#generic_scalars",
+        "why": [
+          "[docs/how-to/custom-scalars-enums.md] Generic deriveLeafCursorBuilder[Genre] + java.time/UUID fields"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlComposedWorldMapping.scala",
+    "tags": [
+      {
+        "tag": "#composed_sql",
+        "why": [
+          "[docs/how-to/compose-mappings.md] SQL world + in-memory currencies composition with combineAndRun batching override"
+        ]
+      },
+      {
+        "tag": "#composed_combine",
+        "why": [
+          "[docs/how-to/compose-mappings.md] SQL world + in-memory currencies composition with combineAndRun batching override"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlCompositeKeyMapping.scala",
+    "tags": [
+      {
+        "tag": "#composite_key",
+        "why": [
+          "[docs/how-to/sql-backends.md] Composite-key join"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlCursorJsonMapping.scala",
+    "tags": [
+      {
+        "tag": "#cursor_json",
+        "why": [
+          "[docs/how-to/jsonb-columns.md] CursorFieldJson decoding a column into JSON in a SQL mapping"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlEmbeddingMapping.scala",
+    "tags": [
+      {
+        "tag": "#embedding",
+        "why": [
+          "[docs/how-to/sql-backends.md] Embedding + PrefixedMapping"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlFilterOrderOffsetLimitMapping.scala",
+    "tags": [
+      {
+        "tag": "#fool_mk",
+        "why": [
+          "[docs/how-to/filtering-ordering-paging.md] Optional filter/order/offset/limit as Result[Query] transformers (snip-tag SqlFilterOrderOffsetLimitMapping mkOffset/mkLimit/mkFilter + elaborator)"
+        ]
+      },
+      {
+        "tag": "#fool_elab",
+        "why": [
+          "[docs/how-to/filtering-ordering-paging.md] Optional filter/order/offset/limit as Result[Query] transformers (snip-tag SqlFilterOrderOffsetLimitMapping mkOffset/mkLimit/mkFilter + elaborator)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlInterfacesMapping.scala",
+    "tags": [
+      {
+        "tag": "#interfaces",
+        "why": [
+          "[docs/how-to/interfaces-unions.md] Interface mapping + entityTypeDiscriminator"
+        ]
+      },
+      {
+        "tag": "#discriminator",
+        "why": [
+          "[docs/how-to/interfaces-unions.md] Interface mapping + entityTypeDiscriminator"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlJsonbMapping.scala",
+    "tags": [
+      {
+        "tag": "#jsonb",
+        "why": [
+          "[docs/how-to/jsonb-columns.md] records TableDef + RowType ObjectMapping with SqlJson"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlJsonbSuite.scala",
+    "tags": [
+      {
+        "tag": "#jsonb_query",
+        "why": [
+          "[docs/how-to/jsonb-columns.md] jsonb descent queries (objects/arrays/fragments) + expected JSON"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlNestedEffectsMapping.scala",
+    "tags": [
+      {
+        "tag": "#currency_handler",
+        "why": [
+          "[docs/how-to/effects-batching.md] Batched nested handler over a CurrencyService (avoids N+1)"
+        ]
+      },
+      {
+        "tag": "#effect_typemappings",
+        "why": [
+          "[docs/how-to/effects-batching.md] Batched nested handler over a CurrencyService (avoids N+1)"
+        ]
+      },
+      {
+        "tag": "#country_handler",
+        "why": [
+          "[docs/how-to/effects-batching.md] Doubly-nested same-mapping re-query handler (runGrouped)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlPaging1Mapping.scala",
+    "tags": [
+      {
+        "tag": "#paging1",
+        "why": [
+          "[docs/how-to/filtering-ordering-paging.md] Counted paging (offset/limit/total/items) PagingInfo + elaborator",
+          "[docs/reference/filtering-paging-nodes.md] FilterOrderByOffsetLimit assembled from Options"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlPaging3Mapping.scala",
+    "tags": [
+      {
+        "tag": "#paging3",
+        "why": [
+          "[docs/how-to/filtering-ordering-paging.md] Has-more paging: overfetch + TransformCursor trim"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlTestMapping.scala",
+    "tags": [
+      {
+        "tag": "#sql_codecs",
+        "why": [
+          "[docs/reference/sql-mapping.md] Abstract codec vocabulary + generic col (SqlTestMapping)"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlUnionsMapping.scala",
+    "tags": [
+      {
+        "tag": "#unions",
+        "why": [
+          "[docs/how-to/interfaces-unions.md] Union mapping + itemTypeDiscriminator"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlUnionSuite.scala",
+    "tags": [
+      {
+        "tag": "#union_query",
+        "why": [
+          "[docs/how-to/interfaces-unions.md] Inline-fragment + __typename query and expected JSON"
+        ]
+      }
+    ]
+  },
+  {
+    "file": "modules/sql-core/src/test/scala/SqlWorldMapping.scala",
+    "tags": [
+      {
+        "tag": "#world_typemappings",
+        "why": [
+          "[docs/how-to/sql-backends.md] World mapping: joins + hidden keys + associative key"
+        ]
+      },
+      {
+        "tag": "#world_elaborator",
+        "why": [
+          "[docs/reference/predicates.md] Predicate vocabulary as used in a real elaborator (And/Not/Lt/In/Contains/IsNull/Like)"
+        ]
+      }
+    ]
+  }
+]

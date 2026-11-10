@@ -1,0 +1,162 @@
+{
+  "subsystem": "Composition / federation of mappings",
+  "summary": "Grackle lets you stitch several independent `Mapping`s together behind a single GraphQL schema. A parent mapping extends `ComposedMapping[F]` and, for any field whose subtree should be served by another mapping, uses a `Delegate(fieldName, otherMapping, join)` field mapping instead of a normal value/SQL field mapping. At query-compile time the `componentElaborator` phase rewrites each delegated `Select` into a `Component(otherMapping, join, child)` query node marking a component boundary. At interpretation time the parent runs its part of the query, then the `join` function is applied to the parent's `Cursor` and the delegated child query to produce a continuation query (e.g. turning `country { currency }` into `fx(code: country.currencyCode)`); that continuation is deferred as a `ProtoJson.component`, grouped by target mapping in `completeAll`, and executed in a later stage by the other mapping's interpreter via its `combineAndRun`. This is the mechanism behind cross-mapping joins such as a SQL-backed `world` schema joined to an in-memory/effectful `currencies` mapping, and it composes recursively and supports per-mapping query batching by overriding `combineAndRun`.",
+  "keyConcepts": [
+    {
+      "name": "ComposedMapping[F]",
+      "explanation": "Base class a parent/root mapping extends to delegate subtrees to other mappings. Its only real job is overriding mkCursorForMappedField to produce a ComposedCursor (a placeholder cursor with focus = null and parent = None) for delegated fields, because the parent has no local data for them. It still needs its own schema, typeMappings and selectElaborator. Defined in modules/core/src/main/scala/composedmapping.scala."
+    },
+    {
+      "name": "Delegate (field mapping)",
+      "explanation": "A FieldMapping (member of Mapping, used inside an ObjectMapping's fieldMappings) of the form Delegate(fieldName, mapping, join). It declares that fieldName on this object type is served by another Mapping. hidden=false, subtree=true. The optional join defaults to ComponentElaborator.TrivialJoin (pass the child query through unchanged). Defined in modules/core/src/main/scala/mapping.scala."
+    },
+    {
+      "name": "join function",
+      "explanation": "A (Query, Cursor) => Result[Query] supplied to Delegate. Given the delegated child Query and the parent's Cursor (focused on the parent object), it returns the continuation Query the OTHER mapping will run. This is where a cross-mapping JOIN is expressed: you pattern-match the parent's focus (e.g. a Country case class) and rewrite Select(\"currency\", child) into Select(\"fx\", Unique(Filter(Eql(.../code, Const(country.currencyCode)), child))). Returning a Group(...) of selects produces a list result (one delegated query per id)."
+    },
+    {
+      "name": "Component query node",
+      "explanation": "case class Component[F](mapping, join, child) — a node in the query algebra marking a component boundary. It is NOT written by hand; the componentElaborator phase produces it from a Delegate. The interpreter, on hitting a Component, applies join to (child, cursor) and emits a deferred ProtoJson.component pointing at the target mapping. Defined in modules/core/src/main/scala/query.scala."
+    },
+    {
+      "name": "componentElaborator phase",
+      "explanation": "A QueryCompiler.Phase auto-derived (lazily) on every Mapping from its Delegate field mappings. It walks the elaborated query and, for any Select whose (objectType, fieldName) matches a registered ComponentMapping, wraps it in Component(targetMapping, join, select). Runs after selectElaborator and before effectElaborator in Mapping.compilerPhases. Defined in modules/core/src/main/scala/compiler.scala / mapping.scala."
+    },
+    {
+      "name": "Deferred execution / completeAll stitching",
+      "explanation": "runValue turns a Component into a ProtoJson.component(mapping, continuationQuery, cursor), an opaque deferred subtree (EffectJson with handler=None). QueryInterpreter.completeAll gathers all deferred subtrees, groups them by (mapping, handler), and for each group calls that mapping.combineAndRun(queries) in a fresh stage, recursing until no deferred subtrees remain. This is what actually runs the delegated query in the other mapping's interpreter and substitutes the results back into the enclosing JSON. Defined in modules/core/src/main/scala/queryinterpreter.scala."
+    },
+    {
+      "name": "combineAndRun (batching hook)",
+      "explanation": "def combineAndRun(queries: List[(Query, Cursor)]): F[Result[List[ProtoJson]]] on Mapping. The default runs each (query, cursor) independently via interpreter.runOneShot. A composed component can override it to batch/group sibling delegated queries into a single backend call (the effectful CurrencyMapping in SqlComposedWorldMapping does exactly this to issue one currencies(...) lookup for many countries). Result list must stay aligned with the input list. Defined in modules/core/src/main/scala/mapping.scala."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "ComposedMapping",
+      "file": "modules/core/src/main/scala/composedmapping.scala",
+      "signature": "abstract class ComposedMapping[F[_]](implicit val M: MonadThrow[F]) extends Mapping[F]",
+      "purpose": "Base class for a parent mapping that delegates subtrees to other mappings."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Two value mappings composed with a cross-mapping join (Country -> Currency)",
+      "code": "import cats.effect.IO\nimport grackle._\nimport grackle.Predicate._\nimport grackle.Query._\nimport grackle.QueryCompiler._\nimport grackle.Value._\nimport grackle.syntax._\n\n// --- Currency component (in-memory) ---\nobject CurrencyData {\n  case class Currency(code: String, exchangeRate: Double)\n  val currencies = List(Currency(\"EUR\", 1.12), Currency(\"GBP\", 1.25))\n}\n\nobject CurrencyMapping extends ValueMapping[IO] {\n  import CurrencyData._\n  val schema = schema\"\"\"\n    type Query { fx(code: String): Currency }\n    type Currency { code: String!  exchangeRate: Float! }\n  \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val CurrencyType = schema.ref(\"Currency\")\n  val typeMappings = List(\n    ValueObjectMapping[Unit](tpe = QueryType,\n      fieldMappings = List(ValueField(\"fx\", _ => currencies))),\n    ValueObjectMapping[Currency](tpe = CurrencyType,\n      fieldMappings = List(\n        ValueField(\"code\", _.code),\n        ValueField(\"exchangeRate\", _.exchangeRate)))\n  )\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"fx\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CurrencyType / \"code\", Const(code)), child)))\n  }\n}\n\n// --- Country component (in-memory) ---\nobject CountryData {\n  case class Country(code: String, name: String, currencyCode: String)\n  val countries = List(\n    Country(\"DEU\", \"Germany\", \"EUR\"),\n    Country(\"GBR\", \"United Kingdom\", \"GBP\"))\n}\n\nobject CountryMapping extends ValueMapping[IO] {\n  import CountryData._\n  val schema = schema\"\"\"\n    type Query { country(code: String): Country  countries: [Country!]! }\n    type Country { code: String!  name: String! }\n  \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val CountryType = schema.ref(\"Country\")\n  val typeMappings = List(\n    ValueObjectMapping[Unit](tpe = QueryType,\n      fieldMappings = List(\n        ValueField(\"country\", _ => countries),\n        ValueField(\"countries\", _ => countries))),\n    ValueObjectMapping[Country](tpe = CountryType,\n      fieldMappings = List(\n        ValueField(\"code\", _.code),\n        ValueField(\"name\", _.name)))\n  )\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"country\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CountryType / \"code\", Const(code)), child)))\n  }\n}\n\n// --- Composition ---\nobject ComposedMapping extends ComposedMapping[IO] {\n  val schema = schema\"\"\"\n    type Query {\n      country(code: String): Country\n      fx(code: String): Currency\n      countries: [Country!]!\n    }\n    type Currency { code: String!  exchangeRate: Float! }\n    type Country { code: String!  name: String!  currency: Currency! }\n  \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val CountryType = schema.ref(\"Country\")\n  val CurrencyType = schema.ref(\"Currency\")\n\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"fx\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CurrencyType / \"code\", Const(code)), child)))\n    case (QueryType, \"country\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CountryType / \"code\", Const(code)), child)))\n  }\n\n  val typeMappings = List(\n    ObjectMapping(tpe = QueryType, fieldMappings = List(\n      Delegate(\"country\", CountryMapping),\n      Delegate(\"countries\", CountryMapping),\n      Delegate(\"fx\", CurrencyMapping))),\n    ObjectMapping(tpe = CountryType, fieldMappings = List(\n      Delegate(\"currency\", CurrencyMapping, countryCurrencyJoin)))\n  )\n\n  def countryCurrencyJoin(q: Query, c: Cursor): Result[Query] =\n    (c.focus, q) match {\n      case (c: CountryData.Country, Select(\"currency\", _, child)) =>\n        Select(\"fx\",\n          Unique(Filter(Eql(CurrencyType / \"code\", Const(c.currencyCode)), child))).success\n      case _ =>\n        Result.internalError(\"Unexpected cursor focus type in countryCurrencyJoin\")\n    }\n}\n\n// query { country(code:\"GBR\"){ name currency { code exchangeRate } } }\n// => { country: { name: \"United Kingdom\", currency: { code: \"GBP\", exchangeRate: 1.25 } } }\nval result: IO[io.circe.Json] = ComposedMapping.compileAndRun(\n  \"\"\"query { country(code: \"GBR\") { name currency { code exchangeRate } } }\"\"\")",
+      "explanation": "Verbatim-equivalent reconstruction of modules/core/src/test/scala/composed/ComposedData.scala (trimmed to two countries/currencies). Shows the three load-bearing pieces: (1) ComposedMapping has its OWN schema (note Country gains a currency: Currency! field absent from the component schema) and its own selectElaborator for root args; (2) Delegate wires Query.country/countries/fx straight through with TrivialJoin and Country.currency through countryCurrencyJoin; (3) the join pattern-matches the parent's Country focus and the Select(\"currency\", _, child) to emit Select(\"fx\", Unique(Filter(Eql(code = currencyCode)))) which the CurrencyMapping runs. Exercised by ComposedSuite tests 'simple nested query', 'simple multiple nested query', 'multiple aliased root queries', 'nested aliased query', 'composed query with introspection'.",
+      "needsDb": false
+    },
+    {
+      "title": "List-valued cross-mapping join (Collection.items via Group)",
+      "code": "// from ComposedListMapping in modules/core/src/test/scala/composed/ComposedListSuite.scala\ndef collectionItemJoin(q: Query, c: Cursor): Result[Query] =\n  (c.focus, q) match {\n    case (c: CollectionData.Collection, Select(\"items\", _, child)) =>\n      Group(c.itemIds.map(id =>\n        Select(\"itemById\",\n          Unique(Filter(Eql(ItemType / \"id\", Const(id)), child))))).success\n    case _ =>\n      Result.internalError(\"Unexpected cursor focus type in collectionItemJoin\")\n  }\n\n// wired as:  Delegate(\"items\", ItemMapping, collectionItemJoin)\n// query { collection { itemIds items { id name } } }\n// => items: [ { id:\"A\", name:\"foo\" }, { id:\"B\", name:\"bar\" } ]",
+      "explanation": "Shows how a join yields a LIST: instead of a single Select, return a Group of one delegated Select per id from the parent's itemIds. The interpreter special-cases Group inside a Component (queryinterpreter.scala runValue, the case (Component(mapping, join, child), _) branch) to build a JSON array. ItemType is the ComposedListMapping's own ref. Exercised by ComposedListSuite 'composed query (1)'..'(4)'.",
+      "needsDb": false
+    },
+    {
+      "title": "SQL-backed parent joined to effectful in-memory currencies (with batching)",
+      "code": "// Composition class: modules/sql-core/src/test/scala/SqlComposedWorldMapping.scala\nclass SqlComposedMapping[F[_]: Sync](world: Mapping[F], currency: Mapping[F])\n    extends ComposedMapping[F] {\n  val schema = schema\"\"\" ... type Country { ... currencies: [Currency!]! } ... \"\"\"\n  val QueryType = schema.ref(\"Query\")\n  val CountryType = schema.ref(\"Country\")\n  val CityType = schema.ref(\"City\")\n\n  val typeMappings = List(\n    ObjectMapping(tpe = QueryType, fieldMappings = List(\n      Delegate(\"country\", world),\n      Delegate(\"countries\", world),\n      Delegate(\"cities\", world))),\n    ObjectMapping(tpe = CountryType, fieldMappings = List(\n      Delegate(\"currencies\", currency)))   // TrivialJoin: code carried via Country.code\n  )\n\n  override val selectElaborator = SelectElaborator {\n    case (QueryType, \"country\", List(Binding(\"code\", StringValue(code)))) =>\n      Elab.transformChild(child =>\n        Unique(Filter(Eql(CountryType / \"code\", Const(code)), child)))\n    case (QueryType, \"cities\", List(Binding(\"namePattern\", StringValue(namePattern)))) =>\n      Elab.transformChild(child => Filter(Like(CityType / \"name\", namePattern, true), child))\n  }\n}\n\n// Instantiation (Skunk):  modules/skunk/js-jvm/src/test/scala/SkunkSuites.scala\ndef mapping: IO[(CurrencyMapping[IO], Mapping[IO])] =\n  for { currencyMapping <- CurrencyMapping[IO] }\n  yield (currencyMapping,\n    new SqlComposedMapping(\n      new SkunkTestMapping(pool) with SqlWorldMapping[IO],\n      currencyMapping))\n\n// query { country(code:\"GBR\"){ name currencies { code exchangeRate } } }",
+      "explanation": "The headline 'SQL world + in-memory currencies' federation. The parent SqlComposedMapping delegates country/countries/cities to a SQL mapping and Country.currencies to the effectful CurrencyMapping. Here Country.currencies uses TrivialJoin because the join key (Country.code) is already in the parent Country context and CurrencyMapping picks it up via its own Env/elaborator. CurrencyMapping overrides combineAndRun to BATCH all per-country currency lookups issued in one stage into a single currencies(countryCodes) call (SqlComposedWorldSuite asserts the currency mapping's call count is exactly 1 for a two-city query). Requires a live world database.",
+      "needsDb": true
+    }
+  ],
+  "gotchas": [
+    "The composed parent needs its OWN schema, usually a superset adding the join field (e.g. Country.currency) absent from both component schemas; forgetting it leaves nowhere to hang the Delegate.",
+    "selectElaborator does NOT compose automatically: the composed mapping must re-declare cases for root fields it owns (country, fx, cities), filtering on its OWN type refs, not the component's.",
+    "The join receives the already-elaborated child query (componentElaborator runs after selectElaborator) and the parent's Cursor focused on the raw model value; you must pattern-match both and return Result.internalError on mismatch.",
+    "A join returns the OTHER mapping's field name (currency -> fx); the interpreter realigns the result name so the client still sees the original field/alias.",
+    "For a list-valued delegated field, return a Group of Selects (one per element), not a single Select returning a list; a Group where a scalar is expected (or vice versa) is a shape mismatch.",
+    "TrivialJoin (the default) only works when the field needs no parent-specific key transform - a true root field, or one the target can resolve from inherited Env/context.",
+    "ComposedCursor has focus = null and parent = None; delegated fields have no local data, so any logic reading parent.focus for a delegated subtree sees null.",
+    "Cross-mapping batching is opt-in per mapping: without overriding combineAndRun a list join is N independent backend calls. The CurrencyMapping override groups them into one (SqlComposedWorldSuite asserts count == 1). Override result lists must stay positionally aligned.",
+    "Composition is recursive (completeAll re-runs per target mapping until no deferred subtrees remain), but each level is a separate interpreter stage, so deep nesting multiplies stages.",
+    "Component is produced solely by componentElaborator from a Delegate; never construct it by hand."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/test/scala/composed/ComposedData.scala",
+      "region": "object CurrencyMapping / object CountryMapping / object ComposedMapping (whole file, lines 28-205); countryCurrencyJoin at lines 194-202",
+      "whatItShows": "The canonical end-to-end composition example: two ValueMappings plus a ComposedMapping that delegates root fields with TrivialJoin and the Country.currency field with an explicit cross-mapping join. Compiles and is the ground truth for the in-memory federation docs."
+    },
+    {
+      "file": "modules/core/src/test/scala/composed/ComposedSuite.scala",
+      "region": "tests 'simple nested query' (72-102), 'simple multiple nested query' (104-150), 'nested aliased query' (194-224), 'composed query with introspection' (226-260)",
+      "whatItShows": "Exact query strings + expected JSON for delegated/nested/aliased/introspected composed queries against ComposedMapping. Ideal as worked-example input/output pairs."
+    },
+    {
+      "file": "modules/core/src/test/scala/composed/ComposedListSuite.scala",
+      "region": "object ComposedListMapping (129-190), especially collectionItemJoin (180-189); tests 'composed query (1)'..'(4)' (246-414)",
+      "whatItShows": "List-valued cross-mapping join using Group, with worked queries returning arrays. Best snippet for documenting one-to-many delegation."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlComposedWorldMapping.scala",
+      "region": "class SqlComposedMapping (222-299) and class CurrencyMapping with overridden combineAndRun (50-203)",
+      "whatItShows": "SQL-world + effectful-currencies federation, plus a real combineAndRun override that batches grouped delegated queries into one backend call. The reference for the 'SQL + in-memory' worked example and for the batching how-to."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlComposedWorldSuite.scala",
+      "region": "tests 'simple composed query' (56-88), 'simple multiple nested query' (90-153 with count assertions n0==0,n1==1), 'simple query with mutation' (155-257)",
+      "whatItShows": "Query/expected-JSON pairs for the SQL-composed case AND assertions proving cross-mapping batching (currency lookup count == 1). Good for the explanation page on staged/batched execution."
+    },
+    {
+      "file": "modules/skunk/js-jvm/src/test/scala/SkunkSuites.scala",
+      "region": "ComposedWorldSuite.mapping (43-52)",
+      "whatItShows": "How the composed mapping is actually instantiated: new SqlComposedMapping(new SkunkTestMapping(pool) with SqlWorldMapping[IO], currencyMapping). The wiring snippet for the how-to."
+    },
+    {
+      "file": "modules/core/src/main/scala/composedmapping.scala",
+      "region": "whole file (23-39)",
+      "whatItShows": "The entire ComposedMapping base class and ComposedCursor - small enough to snip verbatim into reference docs."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Composing mappings: ComposedMapping, Delegate, and joins",
+      "diataxisType": "reference",
+      "outline": [
+        "ComposedMapping[F] - purpose, what it overrides (mkCursorForMappedField -> ComposedCursor), required members (schema, typeMappings, selectElaborator)",
+        "Delegate(fieldName, mapping, join) - signature, hidden/subtree, default TrivialJoin, where it goes (ObjectMapping.fieldMappings)",
+        "The join function type (Query, Cursor) => Result[Query] - inputs (elaborated child + parent cursor focus), outputs (continuation query / Group for lists), error contract",
+        "Component query node and componentElaborator - how Delegate becomes Component, phase ordering (selectElaborator -> componentElaborator -> effectElaborator)",
+        "combineAndRun - default behaviour and override contract (alignment, batching), ProtoJson.component / completeAll staging"
+      ]
+    },
+    {
+      "title": "Compose a SQL mapping with an in-memory mapping",
+      "diataxisType": "how-to",
+      "outline": [
+        "Goal: serve Country (SQL world) and its currencies (in-memory/effectful) from one schema",
+        "Step 1: define the two component mappings independently",
+        "Step 2: write the composed schema as a superset that adds the join field (Country.currencies)",
+        "Step 3: subclass ComposedMapping, add Delegate field mappings (root via world, currencies via currency mapping)",
+        "Step 4: re-declare selectElaborator for root arguments at the composed level",
+        "Step 5: write the join (or rely on TrivialJoin) and handle the cursor-focus pattern match",
+        "Step 6: instantiate (new SqlComposedMapping(worldMapping, currencyMapping)) and run a nested query",
+        "Optional: batch per-element delegated queries by overriding combineAndRun"
+      ]
+    },
+    {
+      "title": "How cross-mapping delegation executes (staged interpretation)",
+      "diataxisType": "explanation",
+      "outline": [
+        "Why composition is multi-stage: the parent cannot see the child's data, so subtrees are deferred",
+        "From query to Component: elaboration rewrites delegated Selects",
+        "At interpretation: join builds the continuation, runValue emits ProtoJson.component (a deferred subtree tagged with its mapping)",
+        "completeAll: gather deferred subtrees, group by (mapping, handler), run each mapping's combineAndRun, recurse",
+        "Why batching matters and how combineAndRun overrides collapse N lookups into 1 (CurrencyMapping case study with the count==1 assertion)",
+        "Scalars vs lists: single Select vs Group, and result-name realignment for aliases"
+      ]
+    },
+    {
+      "title": "Worked example: countries and currencies",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Model two small in-memory components (Country, Currency)",
+        "Add the composed schema with Country.currency",
+        "Wire Delegates and write countryCurrencyJoin",
+        "Run 'country(code:\"GBR\"){ name currency { code exchangeRate } }' and read the JSON",
+        "Extend to a list field (Collection.items) with a Group-returning join",
+        "Point at the SQL-world variant as the next step"
+      ]
+    }
+  ]
+}

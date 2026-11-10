@@ -1,0 +1,249 @@
+{
+  "subsystem": "Mutations",
+  "summary": "Grackle has no dedicated \"mutation runtime\" — GraphQL mutations are modelled as ordinary root fields on the schema's `Mutation` type whose field mappings are `RootEffect`s. A `RootEffect` is an `EffectMapping` that runs an effect `F[Result[(Query, Cursor)]]` before the normal result-construction stage: it performs the effectful write and then yields the (possibly rewritten) query plus a root cursor that the interpreter traverses to build the response. Three convenience constructors cover the common shapes: `RootEffect.computeUnit` (write, leave the query/cursor unchanged), `RootEffect.computeCursor` (write, supply a hand-built cursor — used by in-memory mappings), and `RootEffect.computeChild` (write, then rewrite the child query using data only known after the write, e.g. a freshly-inserted row id). Arguments reach the effect via the elaboration `Env` (populated in the `SelectElaborator` with `Elab.env(...)` and read with `env.getR[...]`). Mutations execute serially in client order within a single `runOneShot` pass; `RootEffect` and `RootStream` share machinery, with `RootStream` reserved for subscriptions. Grackle itself does not open or manage transactions — atomicity is entirely the responsibility of the user's effect (e.g. doobie `.transact(xa)` or a skunk session).",
+  "keyConcepts": [
+    {
+      "name": "RootEffect",
+      "explanation": "An `EffectMapping` field mapping placed on the schema's `Mutation` (or `Query`) object type. It wraps `effect: (Query, Path, Env) => F[Result[(Query, Cursor)]]`. The interpreter runs this effect first (the actual write), then traverses the returned cursor with the returned query to construct the JSON response. This is the entire mechanism behind GraphQL mutations in Grackle — there is no separate mutation API."
+    },
+    {
+      "name": "computeUnit / computeCursor / computeChild",
+      "explanation": "The three convenience constructors on `object RootEffect`. `computeUnit` runs an `Env => F[Result[Unit]]` effect and reuses the default root cursor with the unmodified (elaborated) query — used when the elaborator already rewrote the query (e.g. an UPDATE keyed on an id supplied as an argument). `computeChild` runs `(Query, Path, Env) => F[Result[Query]]`, letting you rewrite the child query *after* the effect — essential when the row id only exists post-INSERT. `computeCursor` runs `(Path, Env) => F[Result[Cursor]]` and supplies a hand-built cursor (e.g. `valueCursor`), used by in-memory ValueMappings and subscriptions."
+    },
+    {
+      "name": "Env-based argument passing",
+      "explanation": "Mutation arguments are not passed directly to the effect. Instead the `SelectElaborator` captures them into the elaboration environment with `Elab.env(name, value)`; the value is later retrieved inside the `RootEffect` body with `env.getR[T](name)` (a `Result[T]`) or `env.get[T](name)` (an `Option[T]`). The interpreter merges per-node environments into the effect's `Env` via `rootCursor.fullEnv.addFromQuery(query)`."
+    },
+    {
+      "name": "Two-phase elaboration for inserts",
+      "explanation": "For an UPDATE the client query can be fully elaborated up front (the `id` is an argument), so `computeUnit` + an elaborator `transformChild` that adds `Unique(Filter(Eql(.../\"id\", Const(id)), child))` suffices. For an INSERT the new row's `id` is unknown until the write runs, so the query rewrite must happen *inside* the effect via `computeChild`, which returns `Unique(Filter(Eql(CityType / \"id\", Const(id)), child)).success` using the id returned by the INSERT."
+    },
+    {
+      "name": "Serial execution of mutation roots",
+      "explanation": "In `QueryInterpreter.runOneShot`, ungrouped root selections are partitioned into effectful (RootEffect-backed) and pure queries. Effectful queries are run with `effectfulQueries.traverse { ... }`, which for `F = IO` executes them sequentially in client order — matching the GraphQL spec requirement that top-level mutation fields run serially (verified by the 'serial execution' test). Results are merged with `|+|`."
+    },
+    {
+      "name": "Transactions are the user's responsibility",
+      "explanation": "Grackle does not begin/commit transactions around a mutation. The `RootEffect` effect value is whatever the user supplies; the doobie test wraps each write in `.transact(transactor)` and the skunk test uses `pool.use(_.prepareR(...))`. Atomicity across the write and the subsequent read-back is therefore not guaranteed by Grackle and must be arranged by the user if required."
+    },
+    {
+      "name": "RootStream vs RootEffect",
+      "explanation": "`RootStream` is the streaming sibling of `RootEffect` (effect type returns `Stream[F, Result[(Query, Cursor)]]`) and is only permitted in subscriptions; `runOneShot` returns an internal error if a `RootStream` appears in a non-subscription. A `RootEffect` can be lifted to a single-element stream via `toRootStream`, which is how subscriptions fall back to a plain effect when no explicit `RootStream` is defined."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "RootEffect",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootEffect private (fieldName: String, effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false; def toRootStream: RootStream = RootStream(fieldName)((q, p, e) => Stream.eval(effect(q, p, e))) }",
+      "purpose": "The field mapping that backs a GraphQL mutation root field. Runs an effect (the write) before result construction and yields the effective query plus root cursor. Constructor is private; use the companion's factory methods."
+    },
+    {
+      "name": "RootEffect.apply",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def apply(fieldName: String)(effect: (Query, Path, Env) => F[Result[(Query, Cursor)]])(implicit pos: SourcePos, di: DummyImplicit): RootEffect",
+      "purpose": "Most general constructor: you compute BOTH the effective query and its root cursor yourself."
+    },
+    {
+      "name": "RootEffect.computeUnit",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeUnit(fieldName: String)(effect: Env => F[Result[Unit]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Perform a side-effecting write that needs no data fed back into the query; the elaborated query and the default root cursor are used unchanged. Used for the UPDATE case where the elaborator already added the id filter."
+    },
+    {
+      "name": "RootEffect.computeCursor",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeCursor(fieldName: String)(effect: (Path, Env) => F[Result[Cursor]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Perform a write and supply a hand-built root cursor (e.g. `valueCursor`) while leaving the client query unmodified. Used by in-memory ValueMappings and as the put-handler in SubscriptionSuite."
+    },
+    {
+      "name": "RootEffect.computeChild",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def computeChild(fieldName: String)(effect: (Query, Path, Env) => F[Result[Query]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Perform a write and then rewrite the child query using data only available after the effect runs (e.g. the id of an inserted row). Executes against the default root cursor for the mapping."
+    },
+    {
+      "name": "EffectMapping",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "trait EffectMapping extends FieldMapping { def subtree: Boolean = true }",
+      "purpose": "Abstract base of field mappings with effects; `RootEffect`, `RootStream` and `EffectField` extend it. `subtree = true` means the mapping owns the whole subtree below the field."
+    },
+    {
+      "name": "RootStream",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "case class RootStream private (fieldName: String, effect: (Query, Path, Env) => Stream[F, Result[(Query, Cursor)]])(implicit val pos: SourcePos) extends EffectMapping { def hidden = false }",
+      "purpose": "Streaming counterpart of RootEffect, used for subscriptions only. A RootEffect can be lifted via `toRootStream`."
+    },
+    {
+      "name": "Env",
+      "file": "modules/core/src/main/scala/cursor.scala",
+      "signature": "sealed trait Env { def add[T](items: (String, T)*): Env; def add(env: Env): Env; def contains(name: String): Boolean; def get[T: ClassTag](name: String): Option[T]; def isEmpty: Boolean; def getR[A: ClassTag: TypeName](name: String): Result[A] = get[A](name).toResultOrError(s\"Key '$name' of type ${typeName[A]} was not found in $this\"); def addFromQuery(query: Query): Env }",
+      "purpose": "The environment used to thread mutation arguments from the elaborator (`Elab.env`) into the RootEffect body (`env.getR` / `env.get`). `getR` yields a `Result` with a 'Key ... was not found' error if absent."
+    },
+    {
+      "name": "Elab.env",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def env(nme: String, value: Any): Elab[Unit]  /* also: env(kv, kvs*), env(kvs: Seq), env(other: Env), and env[T: ClassTag](nme): Elab[Option[T]] */",
+      "purpose": "Called inside a SelectElaborator to bind a mutation's arguments into the elaboration environment so the RootEffect can read them later."
+    },
+    {
+      "name": "Elab.transformChild",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def transformChild(f: Query => Query)(implicit dummy: DummyImplicit): Elab[Unit]  /* also: f: Query => Elab[Query] and f: Query => Result[Query] */",
+      "purpose": "Used in the UPDATE path to rewrite the child query at elaboration time (wrapping it in `Unique(Filter(Eql(CityType / \"id\", Const(id)), child))`)."
+    },
+    {
+      "name": "Query.extractChild / substChild",
+      "file": "modules/core/src/main/scala/query.scala",
+      "signature": "def extractChild(query: Query): Option[Query]   /* and */   def substChild(query: Query, newChild: Query): Option[Query]",
+      "purpose": "computeChild internally calls extractChild to get the selection set under the mutation field, hands it to your effect, then substChild splices your rewritten child back in. If the root query has an unexpected shape these yield 'Root query has unexpected shape' errors."
+    },
+    {
+      "name": "Mapping.rootEffect",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def rootEffect(context: Context, fieldName: String): Option[RootEffect] = typeMappings.fieldMapping(context, fieldName).collect { case re: RootEffect => re }",
+      "purpose": "How the interpreter discovers whether a given root field is effectful (i.e. a mutation)."
+    },
+    {
+      "name": "Mapping.compileAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRun(text: String, name: Option[String] = None, untypedVars: Option[Json] = None, introspectionLevel: IntrospectionLevel = Full, reportUnused: Boolean = true, env: Env = Env.empty)(implicit sc: Compiler[F, F]): F[Json]",
+      "purpose": "The single entry point used by every mutation test to compile and execute a `mutation { ... }` document and get back `F[Json]`."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "In-memory mutation with RootEffect.computeCursor (no DB)",
+      "code": "import cats.effect._\nimport cats.implicits._\nimport fs2.concurrent.SignallingRef\nimport grackle._\nimport grackle.QueryCompiler._\nimport grackle.syntax._\n\ndef mapping(ref: SignallingRef[IO, Int]): Mapping[IO] =\n  new ValueMapping[IO] {\n    val schema: Schema =\n      schema\"\"\"\n        type Query { get: Int! }\n        type Mutation { put(n: Int): Int! }\n      \"\"\"\n\n    val QueryType    = schema.ref(\"Query\")\n    val MutationType = schema.ref(\"Mutation\")\n\n    val typeMappings = List(\n      ObjectMapping(QueryType, List(\n        RootEffect.computeCursor(\"get\")((path, env) =>\n          ref.get.map(n => Result(valueCursor(path, env, n))))\n      )),\n      ObjectMapping(MutationType, List(\n        RootEffect.computeCursor(\"put\")((path, env) =>\n          env.get[Int](\"n\") match {\n            case None    => Result.failure(s\"Implementation error: `n: Int` not found in $env\").pure[IO]\n            case Some(n) => ref.set(n).map(_ => Result(valueCursor(path, env, n)))\n          })\n      ))\n    )\n\n    override val selectElaborator: SelectElaborator =\n      SelectElaborator {\n        case (MutationType, \"put\", List(Query.Binding(\"n\", Value.IntValue(n)))) =>\n          Elab.env(\"n\" -> n)\n      }\n  }\n\n// run it:\nfor {\n  ref <- SignallingRef[IO, Int](0)\n  map  = mapping(ref)\n  res <- map.compileAndRun(\"mutation { put(n: 42) }\")\n} yield res\n// => { \"data\": { \"put\": 42 } }",
+      "explanation": "Verbatim-equivalent to SubscriptionSuite. Shows the full pattern with zero database: the elaborator captures the `n` argument into the Env with `Elab.env`, the RootEffect reads it with `env.get[Int]`, performs the write (`ref.set`), and returns a `valueCursor` carrying the value to render. `Elab.env(\"n\" -> n)` is the tuple-pair overload.",
+      "needsDb": false
+    },
+    {
+      "title": "SQL UPDATE mutation: RootEffect.computeUnit + elaborator transformChild",
+      "code": "// schema:  type Mutation { updatePopulation(id: Int!, population: Int!): City }\ncase class UpdatePopulation(id: Int, population: Int)\n\n// effect supplied by the concrete (doobie) mapping:\ndef updatePopulation(id: Int, population: Int): IO[Unit] =\n  sql\"UPDATE city_copy SET population=$population WHERE id=$id\"\n    .update.run.transact(transactor).void\n\n// field mapping on the Mutation object type:\nRootEffect.computeUnit(\"updatePopulation\")(env =>\n  env.getR[UpdatePopulation](\"updatePopulation\").traverse {\n    case UpdatePopulation(id, pop) => updatePopulation(id, pop)\n  })\n\n// elaborator: capture args AND rewrite the read-back query up front\ncase (MutationType, \"updatePopulation\",\n      List(Binding(\"id\", IntValue(id)), Binding(\"population\", IntValue(pop)))) =>\n  for {\n    _ <- Elab.env(\"updatePopulation\", UpdatePopulation(id, pop))\n    _ <- Elab.transformChild(child =>\n           Unique(Filter(Eql(CityType / \"id\", Const(id)), child)))\n  } yield ()",
+      "explanation": "From SqlMutationMapping.scala + DoobiePgSuites.scala. Because the `id` is a client argument, the query that reads the row back can be fully elaborated up front via `transformChild`, so the effect only has to perform the write and can use `computeUnit` (the elaborated query + default root cursor are reused). `env.getR[UpdatePopulation](...)` returns a `Result` and is sequenced with `.traverse`. The transaction is the user's `.transact(transactor)`, not Grackle's.",
+      "needsDb": true
+    },
+    {
+      "title": "SQL INSERT mutation: RootEffect.computeChild (id known only after the write)",
+      "code": "// schema: type Mutation { createCity(name: String!, countryCode: String!, population: Int!): City }\ncase class CreateCity(name: String, countryCode: String, population: Int)\n\n// effect: INSERT ... RETURNING id, supplied by the concrete (doobie) mapping\ndef createCity(name: String, countryCode: String, population: Int): IO[Int] =\n  sql\"\"\"\n    INSERT INTO city_copy (id, name, countrycode, district, population)\n    VALUES (nextval('city_id'), $name, $countryCode, 'ignored', $population)\n    RETURNING id\n  \"\"\".query[Int].unique.transact(transactor)\n\n// field mapping: rewrite the child query AFTER the insert, using the new id\nRootEffect.computeChild(\"createCity\")((child, _, env) =>\n  env.getR[CreateCity](\"createCity\").flatTraverse {\n    case CreateCity(name, cc, pop) =>\n      createCity(name, cc, pop).map { id =>\n        Unique(Filter(Eql(CityType / \"id\", Const(id)), child)).success\n      }\n  })\n\n// elaborator only needs to capture the arguments (no transformChild here):\ncase (MutationType, \"createCity\",\n      List(Binding(\"name\", StringValue(name)),\n           Binding(\"countryCode\", StringValue(code)),\n           Binding(\"population\", IntValue(pop)))) =>\n  Elab.env(\"createCity\", CreateCity(name, code, pop))",
+      "explanation": "From SqlMutationMapping.scala + DoobiePgSuites.scala. This is the canonical computeChild case: the inserted row's `id` doesn't exist until the INSERT runs, so the read-back query must be built inside the effect. `computeChild` gives you the `child` selection set; you return `Unique(Filter(Eql(CityType / \"id\", Const(id)), child)).success` and Grackle splices it back and runs it against the default root cursor. `.flatTraverse` flattens the `Result[Result[Query]]` produced by combining `getR` and the effect.",
+      "needsDb": true
+    },
+    {
+      "title": "Driving an insert mutation end-to-end (the actual test)",
+      "code": "val query = \"\"\"\n  mutation {\n    createCity(name: \"Wiggum\", countryCode: \"USA\", population: 789) {\n      name\n      population\n      country { name }\n    }\n  }\n\"\"\"\n\nval res = mapping.compileAndRun(query)   // IO[Json]\n\n// expected:\n// { \"data\": { \"createCity\": {\n//     \"name\": \"Wiggum\", \"population\": 789,\n//     \"country\": { \"name\": \"United States\" } } } }",
+      "explanation": "From SqlMutationSuite.scala. Demonstrates that a single `compileAndRun` both performs the write and returns the requested selection set of the newly written row — including a join back to `country` — proving the read-back query is executed against live data produced by the effect.",
+      "needsDb": true
+    }
+  ],
+  "gotchas": [
+    "RootEffect's case-class constructor is private. You MUST use the companion factories (`RootEffect.apply`, `computeUnit`, `computeCursor`, `computeChild`) — you cannot `new RootEffect(...)` from user code.",
+    "Arguments are NOT passed to the effect directly. They flow through the elaboration Env: bind them in the `SelectElaborator` with `Elab.env(name, value)` and read them in the effect with `env.getR[T](name)` / `env.get[T](name)`. Forgetting the `Elab.env` step makes `env.getR` fail at runtime with 'Key ... of type ... was not found'.",
+    "Choosing the wrong constructor for inserts: for an UPDATE keyed on an argument you can elaborate the read-back query up front (`computeUnit` + `transformChild`), but for an INSERT whose id is generated by the DB you MUST use `computeChild` and rewrite the query inside the effect — the id does not exist at elaboration time. The test comments call this out explicitly ('the query must be elaborated *after* execution of the effect').",
+    "Grackle does not manage transactions. There is no implicit transaction wrapping the write plus the subsequent read-back. The doobie tests use `.transact(transactor)` per statement and the skunk tests use `pool.use(...)`; if you need the write and read-back to be atomic you must arrange that yourself. The two halves can run on different connections/transactions.",
+    "computeChild requires the root query to have a recognisable shape. Internally it uses `Query.extractChild` / `Query.substChild`; if the top-level selection isn't a plain `Select`/`UntypedSelect` (optionally wrapped in `Environment`/`TransformCursor`) you get 'Root query has unexpected shape' errors.",
+    "`RootStream` is rejected outside subscriptions: `runOneShot` returns 'RootStream only permitted in subscriptions', and conversely subscriptions require an `EffectMapping` ('EffectMapping required for subscriptions'). Don't put a `RootStream` on the Mutation type.",
+    "Top-level mutation fields execute serially in client order (per the GraphQL spec). This is implied by `effectfulQueries.traverse` in `runOneShot` and is asserted by the 'serial execution' test (one:put / two:put / three:put leaves the ref at 3). Do not assume parallelism between sibling mutation roots.",
+    "`env.getR[T]` returns a `Result[T]` (an error value), not a thrown exception, when the key/type is missing — so you must sequence it (`.traverse`/`.flatTraverse`) rather than pattern-matching as if it were the raw value. `env.get[T]` returns `Option[T]` and silently yields `None` on type mismatch (it uses `classTag[T].unapply`).",
+    "The SQL mutation tests deliberately operate on a *copy* table `city_copy` (created via `CREATE TABLE city_copy AS SELECT * FROM city` and dropped afterwards) so the writes don't corrupt the shared read-only `city` fixture. The TableDef is `TableDef(\"city_copy\")` while the GraphQL type is still `City`.",
+    "`computeCursor` leaves the client query unmodified, so any data produced by the effect can only reach result construction via the cursor's environment (`qc.map(_.withEnv(env))` / `valueCursor(path, env, value)`). If you build a cursor that doesn't carry the written value, the response won't reflect it."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/sql-core/src/test/scala/SqlMutationMapping.scala",
+      "region": "typeMappings — Mutation ObjectMapping (lines 74-97) and selectElaborator (lines 118-140)",
+      "whatItShows": "The canonical, compiling definition of both an UPDATE (computeUnit + transformChild) and an INSERT (computeChild) mutation, including how arguments are captured into the Env via Elab.env. Schema with `type Mutation { updatePopulation/createCity }` is lines 39-61."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlMutationSuite.scala",
+      "region": "whole file (3 tests: 'simple update' lines 62-92, 'insert' lines 96-126)",
+      "whatItShows": "End-to-end mutation execution via `mapping.compileAndRun(query)` with the exact GraphQL mutation document and expected JSON response, including read-back of a joined `country` field. The comments above each test explain the elaborate-before vs elaborate-after distinction."
+    },
+    {
+      "file": "modules/doobie-pg/src/test/scala/DoobiePgSuites.scala",
+      "region": "MutationSuite (lines 150-181): withDuplicatedTables + updatePopulation/createCity implementations",
+      "whatItShows": "Concrete effect implementations: doobie `sql\"...\".update.run.transact(transactor)` for UPDATE and `INSERT ... RETURNING id` via `.query[Int].unique.transact(transactor)`, plus the city_copy table setup/teardown Resource."
+    },
+    {
+      "file": "modules/skunk/js-jvm/src/test/scala/SkunkSuites.scala",
+      "region": "MutationSuite (lines 153-186): updatePopulation/createCity via skunk prepared statements",
+      "whatItShows": "The same mutation effects implemented with skunk (`pool.use(_.prepareR(...).use(ps => ps.execute/ps.unique))`), a useful contrasting backend for the how-to page."
+    },
+    {
+      "file": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala",
+      "region": "mapping(...) (lines 33-85) and tests 'sanity check put' (107-125), 'serial execution' (167-196)",
+      "whatItShows": "A complete, DB-free mutation (`put`) using RootEffect.computeCursor over a SignallingRef, with Elab.env capturing the argument; plus a test proving serial execution of sibling mutation roots."
+    },
+    {
+      "file": "modules/core/src/test/scala/effects/ValueEffectData.scala",
+      "region": "ValueEffectMapping — RootEffect.computeCursor (lines 42-62)",
+      "whatItShows": "Minimal RootEffect.computeCursor on a ValueMapping returning a `valueCursor(p, e, Struct(...))`; the smallest possible RootEffect example."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "RootEffect case class + object RootEffect (lines 1168-1249)",
+      "whatItShows": "The authoritative definitions and scaladoc of RootEffect and its four factory methods, including the exact internal wiring (extractChild/substChild/defaultRootCursor) that the reference page should quote."
+    },
+    {
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "region": "runOneShot (lines 90-167)",
+      "whatItShows": "How RootEffects are discovered (mapping.rootEffect), partitioned from pure queries, executed (traverse → serial), and how the resulting (query, cursor) is fed to runValue. The source of the serial-execution and RootStream-rejection behaviour."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "RootEffect and the Mutation API",
+      "diataxisType": "reference",
+      "outline": [
+        "RootEffect case class: fields (fieldName, effect: (Query, Path, Env) => F[Result[(Query, Cursor)]]), private constructor, toRootStream",
+        "Factory methods with exact signatures: apply, computeUnit, computeCursor, computeChild — inputs, what each leaves unchanged (query vs cursor), and when to use each",
+        "EffectMapping base trait and subtree=true semantics",
+        "Env API surface relevant to effects: getR (Result), get (Option), add, addFromQuery",
+        "Elab.env and Elab.transformChild overloads used during elaboration",
+        "Query.extractChild / substChild contract and the 'Root query has unexpected shape' error",
+        "Relationship to RootStream and where each is permitted (mutations vs subscriptions)",
+        "Mapping.rootEffect / Mapping.compileAndRun entry points"
+      ]
+    },
+    {
+      "title": "How GraphQL mutations work in Grackle",
+      "diataxisType": "explanation",
+      "outline": [
+        "Mutations are just RootEffect field mappings on the Mutation object type — there is no separate mutation engine",
+        "The two-phase model: elaboration (capture args into Env, optionally rewrite the read-back query) then effect (perform the write, optionally rewrite the query, yield a cursor)",
+        "Why inserts need computeChild but updates can use computeUnit: the id-known-after-write problem",
+        "Argument threading through the elaboration Env (Elab.env -> env.getR)",
+        "Serial execution of sibling mutation roots and how it satisfies the GraphQL spec (runOneShot/traverse)",
+        "Transactions: what Grackle does and does NOT do; where atomicity must be added by the user",
+        "RootEffect vs RootStream: shared machinery, different permitted contexts"
+      ]
+    },
+    {
+      "title": "Implementing a create/update mutation against a SQL database",
+      "diataxisType": "how-to",
+      "outline": [
+        "Add `type Mutation { ... }` to the schema and the corresponding TableDef (use a copy table for tests)",
+        "Define an UPDATE: computeUnit + Elab.env + Elab.transformChild to key the read-back on the argument id",
+        "Define an INSERT that returns the new row: computeChild + INSERT ... RETURNING id, rewriting the child query with the returned id",
+        "Wire the effect to a concrete backend (doobie .transact / skunk pool.use) — show both",
+        "Wrap the write in a transaction if atomicity with the read-back is required",
+        "Run it with compileAndRun and assert the returned selection set (including joined fields)",
+        "Common errors: 'Key not found' (missing Elab.env), wrong constructor for inserts, RootStream-in-mutation rejection"
+      ]
+    },
+    {
+      "title": "Build an in-memory mutation with computeCursor",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Start from a ValueMapping with a SignallingRef-backed state",
+        "Define a Mutation type with a single field (put(n: Int): Int!)",
+        "Capture the argument in the SelectElaborator with Elab.env",
+        "Implement the field with RootEffect.computeCursor: read the arg from env, mutate the ref, return valueCursor",
+        "Run a `query { get }` / `mutation { put(n: 42) }` / `query { get }` sequence and observe the state change",
+        "Show serial execution with aliased sibling puts",
+        "(No database required throughout)"
+      ]
+    }
+  ]
+}

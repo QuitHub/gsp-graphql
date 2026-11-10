@@ -1,0 +1,246 @@
+{
+  "subsystem": "Circe (JSON) backend — grackle.circe",
+  "summary": "The Circe backend lets you build a Grackle `Mapping` whose data source is in-memory circe `Json` rather than a database. The whole subsystem lives in a single source file, `modules/circe/src/main/scala/circemapping.scala`, and exposes two entry points: the abstract class `CirceMapping[F]` (extend this for a standalone JSON-backed mapping) and the trait `CirceMappingLike[F]` (mix this into other mappings — notably `SqlMappingLike` extends it — to splice JSON-valued fields into a non-JSON mapping). Field-level building blocks are `CirceField` (a constant `Json` subtree) and `CursorFieldJson` (a `Json` subtree computed from the parent `Cursor`); both produce a `CirceCursor`, the `Cursor` implementation that walks a `Json` value against the GraphQL schema. The backend is the canonical choice for fixtures/tests, statically-known data, REST/HTTP responses already in JSON, and effectful roots that yield JSON, via the `RootEffect.computeJson`/`computeEncodable` and `RootStream.computeJson`/`computeEncodable` syntax extensions. It requires no database; `F` only needs a `cats.MonadThrow`.",
+  "keyConcepts": [
+    {
+      "name": "CirceMapping vs CirceMappingLike",
+      "explanation": "`CirceMappingLike[F]` is the trait carrying all behavior (cursor construction, field mappings, root-effect syntax). `CirceMapping[F]` is just `abstract class CirceMapping[F](implicit M: MonadThrow[F]) extends Mapping[F] with CirceMappingLike[F]` — the convenient base class for a standalone JSON-backed mapping. Use the trait when you want to add JSON fields to an existing mapping (e.g. a SQL mapping) rather than start from scratch; `SqlMappingLike` already does `extends CirceMappingLike[F]`, which is why `CirceField`/`CursorFieldJson` are usable in SQL mappings."
+    },
+    {
+      "name": "CirceCursor walks Json against the schema",
+      "explanation": "`CirceCursor` is a `Cursor` that holds a `Json` focus plus the GraphQL `Context` (current type). Navigation methods (`field`, `asList`, `narrow`, `asNullable`, `asLeaf`) interpret the JSON shape through the lens of the GraphQL type at that point. Object fields are looked up by name in the JSON object; lists require a JSON array; leaves are validated against the expected scalar/enum type."
+    },
+    {
+      "name": "CirceField — constant JSON subtree",
+      "explanation": "`CirceField(fieldName, value: Json)` maps a GraphQL field to a fixed `Json` value. The entire subtree under that field is served from this JSON. Its `subtree` flag is true, meaning Grackle treats it as opaque: the JSON inside is matched structurally against the schema and the rest of the typeMappings are NOT consulted for fields inside it (see CircePrioritySuite)."
+    },
+    {
+      "name": "CursorFieldJson — computed JSON subtree",
+      "explanation": "`CursorFieldJson(fieldName, f: Cursor => Result[Json], required: List[String], hidden)` is like `CirceField` but the JSON is computed from the parent `Cursor` (so it can read sibling fields named in `required`). This is the bridge used to splice JSON into non-JSON backends, e.g. decoding a DB column into a JSON object in SqlCursorJsonMapping."
+    },
+    {
+      "name": "Opaque-subtree priority semantics",
+      "explanation": "Because `CirceFieldMapping.subtree == true`, a JSON value supplied by `CirceField`/`CursorFieldJson` is self-contained. `CirceCursor.field` first looks for the field inside the current JSON object and only falls back to `mkCursorForField` (the mapping's other typeMappings) when the JSON object does not contain that field. CircePrioritySuite demonstrates this: `present` has `name` in its JSON so the literal 'Bob' wins; `fallback` omits it so the explicit `CirceField('name', 'Steve')` mapping on `Monkey` is used."
+    },
+    {
+      "name": "Effectful JSON roots",
+      "explanation": "`CirceMappingLike` enriches `RootEffect` and `RootStream` companion objects with `computeJson` (effect yields `Json`) and `computeEncodable[A]` (effect yields `A` with a circe `Encoder[A]`). Both ultimately call core `computeCursor`, wrapping the result in a `CirceCursor` via `circeCursor(path, env, json)`. `computeCursor` can also be used directly with `circeCursor(...)` for full control (CirceEffectData shows all three)."
+    },
+    {
+      "name": "circeCursor helper and root vs nested",
+      "explanation": "`circeCursor(path, env, value)` builds the right cursor for a position: if `path.isRoot` it makes a `CirceCursor` at `Context(path.rootTpe)`; otherwise it returns a `DeferredCursor` that builds the `CirceCursor` once the parent context is known. In effect handlers you choose `Path.from(p.rootTpe)` (rooted: JSON includes the field name) vs `p` (nested: JSON is the field's value) — CirceEffectData contrasts `qux` (rooted) with `foo` (nested)."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "CirceMapping",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "abstract class CirceMapping[F[_]](implicit val M: MonadThrow[F]) extends Mapping[F] with CirceMappingLike[F]",
+      "purpose": "Convenience base class for a standalone mapping whose data is circe Json. Extend it, provide `schema` and `typeMappings`. Only requires a MonadThrow[F] (no DB)."
+    },
+    {
+      "name": "CirceMappingLike",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "trait CirceMappingLike[F[_]] extends Mapping[F]",
+      "purpose": "The mixin carrying all circe behavior (circeCursor, mkCursorForMappedField override, CirceField/CursorFieldJson/CirceCursor, root-effect syntax). Mix into other mappings to add JSON-valued fields; SqlMappingLike extends it."
+    },
+    {
+      "name": "CirceField",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CirceField(fieldName: String, value: Json, hidden: Boolean = false)(implicit val pos: SourcePos) extends CirceFieldMapping",
+      "purpose": "FieldMapping serving a constant Json subtree for a GraphQL field. `subtree` is true (opaque)."
+    },
+    {
+      "name": "CursorFieldJson",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CursorFieldJson(fieldName: String, f: Cursor => Result[Json], required: List[String], hidden: Boolean = false)(implicit val pos: SourcePos) extends CirceFieldMapping",
+      "purpose": "FieldMapping that computes a Json subtree from the parent Cursor (can read sibling fields listed in `required`). Used to splice JSON into any backend, e.g. decoding a SQL column."
+    },
+    {
+      "name": "CirceCursor",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "case class CirceCursor(context: Context, focus: Json, parent: Option[Cursor], env: Env) extends Cursor",
+      "purpose": "Cursor implementation that traverses a Json focus against the GraphQL type in `context`. Implements field/asList/asLeaf/narrow/asNullable/etc."
+    },
+    {
+      "name": "CirceFieldMapping",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "sealed trait CirceFieldMapping extends FieldMapping { def subtree: Boolean = true }",
+      "purpose": "Sealed parent of CirceField and CursorFieldJson; marks both as opaque subtree mappings."
+    },
+    {
+      "name": "circeCursor",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "def circeCursor(path: Path, env: Env, value: Json): Cursor",
+      "purpose": "Builds a CirceCursor at the given path (root → direct CirceCursor; non-root → DeferredCursor). Used by the computeJson/computeEncodable syntax and callable directly in computeCursor handlers."
+    },
+    {
+      "name": "mkCursorForMappedField (override)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "override def mkCursorForMappedField(parent: Cursor, fieldContext: Context, fm: FieldMapping): Result[Cursor]",
+      "purpose": "Dispatches CirceField → CirceCursor(json), CursorFieldJson → run f then CirceCursor, else delegates to super. This is how circe field mappings become cursors."
+    },
+    {
+      "name": "RootEffect.computeJson (syntax)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "def computeJson(fieldName: String)(effect: (Path, Env) => F[Result[Json]])(implicit pos: SourcePos): RootEffect",
+      "purpose": "Root effect (query/mutation setup) whose effect yields Json; auto-wraps into a CirceCursor."
+    },
+    {
+      "name": "RootEffect.computeEncodable (syntax)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "def computeEncodable[A](fieldName: String)(effect: (Path, Env) => F[Result[A]])(implicit pos: SourcePos, enc: Encoder[A]): RootEffect",
+      "purpose": "Like computeJson but the effect yields a value `A` encoded via a circe Encoder[A]."
+    },
+    {
+      "name": "RootStream.computeJson (syntax)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "def computeJson(fieldName: String)(effect: (Path, Env) => Stream[F, Result[Json]])(implicit pos: SourcePos): RootStream",
+      "purpose": "Subscription/stream variant: each emitted Json becomes a CirceCursor result."
+    },
+    {
+      "name": "RootStream.computeEncodable (syntax)",
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "signature": "def computeEncodable[A](fieldName: String)(effect: (Path, Env) => Stream[F, Result[A]])(implicit pos: SourcePos, enc: Encoder[A]): RootStream",
+      "purpose": "Stream variant of computeEncodable; emits encoded values as CirceCursor results."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Standalone JSON-backed mapping with a constant CirceField",
+      "code": "import cats.effect.IO\nimport io.circe.literal._\nimport grackle._\nimport grackle.circe.CirceMapping\nimport grackle.syntax._\n\nobject TestCirceMapping extends CirceMapping[IO] {\n  val schema =\n    schema\"\"\"\n      type Query { root: Root }\n      type Root {\n        bool: Boolean\n        int: Int\n        string: String\n        array: [Int!]\n        object: A\n      }\n      type A { id: ID, aField: Int }\n    \"\"\"\n\n  val QueryType = schema.ref(\"Query\")\n\n  val data =\n    json\"\"\"\n      {\n        \"bool\": true,\n        \"int\": 23,\n        \"string\": \"foo\",\n        \"array\": [1, 2, 3],\n        \"object\": { \"id\": \"obj\", \"aField\": 27 }\n      }\n    \"\"\"\n\n  val typeMappings =\n    List(\n      ObjectMapping(\n        tpe = QueryType,\n        fieldMappings = List(\n          CirceField(\"root\", data)\n        )\n      )\n    )\n}\n\n// run a query\nTestCirceMapping.compileAndRun(\"\"\"query { root { int string object { aField } } }\"\"\")",
+      "explanation": "The whole `Root` subtree is served from one constant `Json`. Note `CirceMapping[IO]` only needs `MonadThrow[IO]` — no database. Distilled from modules/circe/src/test/scala/CirceData.scala + CirceSuite.scala; the json/schema interpolators come from grackle.syntax._ and io.circe.literal._.",
+      "needsDb": false
+    },
+    {
+      "title": "Custom scalar via LeafMapping plus a CursorField reading hidden JSON",
+      "code": "import cats.data.OptionT\nimport io.circe.Json\nimport grackle._\nimport grackle.syntax._\n\n// inside a CirceMapping with `data` containing a top-level \"hidden\": 13\nval BigDecimalType = schema.ref(\"BigDecimal\")\nval RootType = schema.ref(\"Root\")\n\nval typeMappings =\n  List(\n    ObjectMapping(\n      tpe = RootType,\n      fieldMappings = List(\n        CursorField(\"computed\", computeField, List(\"hidden\"))\n      )\n    ),\n    LeafMapping[BigDecimal](BigDecimalType)\n  )\n\ndef computeField(c: Cursor): Result[Option[Int]] =\n  (for {\n    n <- OptionT(c.fieldAs[Json](\"hidden\").map(_.asNumber))\n    i <- OptionT(Result(n.toInt))\n  } yield i + 1).value",
+      "explanation": "Shows two things: a custom GraphQL `scalar BigDecimal` served straight from JSON needs a `LeafMapping[BigDecimal]` (the schema's built-in scalars need no mapping), and a `CursorField` can read a JSON field that exists in the data but is NOT in the schema (`hidden`) by declaring it in `required`. Verbatim shape from CirceData.scala lines 115-123.",
+      "needsDb": false
+    },
+    {
+      "title": "Effectful JSON root (computeJson / computeEncodable / computeCursor)",
+      "code": "import cats.effect.Sync\nimport cats.implicits._\nimport io.circe.{Encoder, Json}\nimport grackle._\nimport grackle.circe.CirceMapping\nimport grackle.syntax._\n\nclass TestCirceEffectMapping[F[_]: Sync] extends CirceMapping[F] {\n  val schema = schema\"\"\"\n    type Query { foo: Struct!, bar: Struct!, baz: Struct! }\n    type Struct { n: Int!, s: String! }\n  \"\"\"\n  val QueryType = schema.ref(\"Query\")\n\n  case class Struct(n: Int, s: String)\n  implicit val EncodeStruct: Encoder[Struct] = s =>\n    Json.obj(\"n\" -> Json.fromInt(s.n), \"s\" -> Json.fromString(s.s))\n\n  val typeMappings = List(\n    ObjectMapping(\n      tpe = QueryType,\n      fieldMappings = List(\n        // full control: build the CirceCursor yourself\n        RootEffect.computeCursor(\"foo\")((p, e) =>\n          Sync[F].pure(Result(circeCursor(p, e,\n            Json.obj(\"n\" -> Json.fromInt(42), \"s\" -> Json.fromString(\"hi\")))))),\n        // yield Json, let circe build the cursor\n        RootEffect.computeJson(\"bar\")((_, _) =>\n          Sync[F].pure(Result(Json.obj(\"n\" -> Json.fromInt(42), \"s\" -> Json.fromString(\"ho\"))))),\n        // yield an encodable value\n        RootEffect.computeEncodable(\"baz\")((_, _) =>\n          Sync[F].pure(Result(Struct(44, \"hee\"))))\n      )\n    )\n  )\n}",
+      "explanation": "All three effect styles target circe. `computeCursor` needs the explicit `circeCursor(p, e, json)` call; `computeJson` and `computeEncodable` are the circe syntax extensions that wrap the result automatically. Adapted directly from CirceEffectData.scala (which uses a SignallingRef to count effects); here the effect bodies are simplified to `Sync[F].pure`.",
+      "needsDb": false
+    },
+    {
+      "title": "Opaque-subtree priority: JSON value beats explicit mapping",
+      "code": "import cats.effect.IO\nimport io.circe.Json\nimport io.circe.literal._\nimport grackle.circe.CirceMapping\nimport grackle.syntax._\n\nobject CircePriorityMapping extends CirceMapping[IO] {\n  val schema = schema\"\"\"\n    scalar Foo\n    type Monkey { name: Foo }\n    type Barrel { monkey: Monkey }\n    type Query { present: Barrel, fallback: Barrel }\n  \"\"\"\n  val QueryType  = schema.ref(\"Query\")\n  val MonkeyType = schema.ref(\"Monkey\")\n  val FooType    = schema.ref(\"Foo\")\n\n  val typeMappings = List(\n    ObjectMapping(QueryType, List(\n      CirceField(\"present\",  json\"\"\"{ \"monkey\": { \"name\": \"Bob\" }}\"\"\"),\n      CirceField(\"fallback\", json\"\"\"{ \"monkey\": {}}\"\"\")\n    )),\n    ObjectMapping(MonkeyType, List(\n      CirceField(\"name\", Json.fromString(\"Steve\"))\n    )),\n    LeafMapping[String](FooType)\n  )\n}\n// present.monkey.name == \"Bob\" (from JSON); fallback.monkey.name == \"Steve\" (explicit mapping)",
+      "explanation": "Because CirceField is an opaque subtree, a field present in the JSON wins; only when the JSON object omits the field does Grackle fall back to other typeMappings (here the explicit Monkey.name). Verbatim from CircePrioritySuite.scala.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "CirceField/CursorFieldJson are opaque subtrees (`subtree == true`). `CirceCursor.field` looks inside the JSON object first and only falls back to other typeMappings when the JSON lacks the field. So an explicit field mapping for a nested type is shadowed whenever the JSON already provides that field (see CircePrioritySuite: 'present' returns 'Bob', not 'Steve').",
+    "Custom GraphQL scalars served from JSON still need a `LeafMapping[T]` (e.g. `LeafMapping[BigDecimal](BigDecimalType)`), otherwise `asLeaf`'s catch-all `case _: ScalarType if !focus.isObject => focus.success` will pass the raw JSON through but the type won't be registered/encoded as you expect. Built-in scalars (Int/Float/String/Boolean/ID) need no mapping.",
+    "`asLeaf` for `IntType` re-parses through `_.toLong` and emits `Json.fromLong`; a JSON number that is not integral (or overflows Long) fails with 'Expected Int found ...'. `FloatType` passes the number through unchanged. Enums must be JSON strings whose value is a declared enum value, else an internalError.",
+    "JSON fields not present in the GraphQL schema are simply unreachable by queries — querying them yields 'No field X for type ...' (CirceSuite 'hidden' test). But such extra JSON fields CAN be read internally by a `CursorField`/`CursorFieldJson` via `required` + `c.fieldAs[Json](name)` (CirceData computeField reads 'hidden').",
+    "`narrowsTo` (interface/union fragment matching) inspects the JSON object's keys: a subtype matches only if every non-nullable field of the subtype is present in the JSON object AND every JSON key corresponds to a field of the subtype. Missing required keys or extra unknown keys cause the narrow to fail. This drives `__typename` resolution for interfaces (CirceSuite 'introspection'/'fragments').",
+    "In effect handlers, choosing the path matters: `circeCursor(p, e, json)` (or `RootEffect.computeJson` which uses `p`) expects `json` to be the *value of the field*; `circeCursor(Path.from(p.rootTpe), e, json)` expects `json` to be an object *containing the field name*. Mixing these up yields a shape mismatch. CirceEffectData contrasts 'qux' (rooted, wraps in { \"qux\": {...} }) with 'foo' (nested, just {...}).",
+    "`CirceCursor.mkChild` resets the child's `Env` to `Env.empty` (the new cursor does not inherit the parent's env). `withEnv` on a CirceCursor adds to the existing env. Don't rely on env propagating downward through navigation automatically.",
+    "`CirceMapping` requires only `MonadThrow[F]`, but the effectful root syntax examples and tests use `Sync[F]`/`IO` because they perform real effects (e.g. SignallingRef). The base class itself imposes no Sync requirement.",
+    "`CirceMappingLike` is the trait you mix into non-circe backends; `SqlMappingLike extends CirceMappingLike`, which is the only reason `CirceField`/`CursorFieldJson`/`circeCursor` are available inside SQL mappings (SqlCursorJsonMapping uses CursorFieldJson to decode a DB column into JSON)."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/circe/src/main/scala/circemapping.scala",
+      "region": "whole file (only ~210 lines); esp. CirceMapping (31-33), CirceMappingLike root-effect syntax (35-58), circeCursor (60-66), mkCursorForMappedField (68-80), CirceField/CursorFieldJson (82-96), CirceCursor (98-211)",
+      "whatItShows": "The complete public surface of the subsystem; every signature to quote lives here."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceData.scala",
+      "region": "object TestCirceMapping (29-129)",
+      "whatItShows": "Canonical standalone CirceMapping: schema with scalars/enums/interfaces/custom scalar, a constant CirceField('root', data), LeafMapping for a custom scalar, a CursorField reading a hidden JSON field, and a SelectElaborator (numChildren = Count). Compiles and is exercised by CirceSuite."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceSuite.scala",
+      "region": "tests scalars/enums/objects/arrays/fragments/introspection/count/hidden/computed (22-342)",
+      "whatItShows": "End-to-end query+expected-JSON pairs for every JSON shape (leaf, enum, object, list, interface fragment, __typename, count, unknown-field error, computed field). Ideal verbatim how-to snippets paired with TestCirceMapping."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CircePrioritySuite.scala",
+      "region": "object CircePriorityMapping + test (26-104)",
+      "whatItShows": "Minimal, self-contained demonstration of opaque-subtree priority (CirceField value vs explicit field mapping). Great for the 'gotchas' explanation page."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceEffectData.scala",
+      "region": "class TestCirceEffectMapping (27-113)",
+      "whatItShows": "All effectful root styles side by side: RootEffect.computeCursor(circeCursor...), computeJson, computeEncodable (with a custom Encoder), plus rooted-vs-nested path usage. Uses SignallingRef to prove effects run exactly once per root."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceEffectSuite.scala",
+      "region": "tests nested/rooted/aliased/multiple (24-200)",
+      "whatItShows": "Verifies effect counts and result JSON for the effectful roots; shows compileAndRun returning IO[Json] and how aliases interact with effects."
+    },
+    {
+      "file": "modules/sql-core/src/test/scala/SqlCursorJsonMapping.scala",
+      "region": "whole trait (29-106), esp. decodeCategories + CursorFieldJson mapping (77-100)",
+      "whatItShows": "Cross-backend usage: a SQL mapping using CursorFieldJson to decode an int column into a JSON array via a circe Encoder, proving CirceMappingLike is reusable outside the circe module."
+    },
+    {
+      "file": "modules/sql-core/src/main/scala/SqlMapping.scala",
+      "region": "line 43: trait SqlMappingLike[F] extends CirceMappingLike[F] with SqlModule[F]",
+      "whatItShows": "The one line establishing that SQL mappings inherit the entire circe field-mapping surface."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "CirceMapping API reference",
+      "diataxisType": "reference",
+      "outline": [
+        "CirceMapping[F] abstract class — signature, MonadThrow[F] requirement, what to implement (schema, typeMappings)",
+        "CirceMappingLike[F] trait — purpose and the mixin relationship (SqlMappingLike extends it)",
+        "CirceField(fieldName, value: Json, hidden) — constant subtree, opaque/subtree=true",
+        "CursorFieldJson(fieldName, f, required, hidden) — computed subtree, required fields",
+        "CirceCursor(context, focus, parent, env) — Cursor method behavior table (field/asLeaf/asList/narrow/asNullable/isLeaf)",
+        "circeCursor(path, env, value) — root vs DeferredCursor behavior",
+        "Root-effect/stream syntax: RootEffect.computeJson / computeEncodable, RootStream.computeJson / computeEncodable — full signatures and Encoder requirement",
+        "mkCursorForMappedField override — dispatch table"
+      ]
+    },
+    {
+      "title": "Serving a GraphQL API from circe JSON",
+      "diataxisType": "how-to",
+      "outline": [
+        "When to choose the circe backend (fixtures, static data, JSON from REST/HTTP, no DB)",
+        "Step 1: define the schema with schema\"...\"",
+        "Step 2: provide a Json value (io.circe.literal.json\"...\" or programmatic)",
+        "Step 3: map a field to it with CirceField",
+        "Step 4: map custom scalars with LeafMapping[T]",
+        "Step 5: computing a field from JSON with CursorField/CursorFieldJson and required",
+        "Step 6: running queries with compileAndRun",
+        "How-to: effectful roots that fetch JSON (computeJson) or domain values (computeEncodable)",
+        "How-to: streaming/subscriptions with RootStream.computeJson",
+        "How-to: splice JSON into a SQL mapping via CursorFieldJson (link to SqlCursorJsonMapping)"
+      ]
+    },
+    {
+      "title": "How the circe backend maps JSON onto the schema",
+      "diataxisType": "explanation",
+      "outline": [
+        "CirceCursor as a typed lens over Json: focus + Context",
+        "Leaf validation rules (Int re-parse, Float passthrough, enum string check, custom scalar catch-all)",
+        "Opaque subtrees: why CirceField/CursorFieldJson set subtree=true and the field-lookup fallback order (JSON first, then typeMappings) — worked example from CircePrioritySuite",
+        "Interface/union narrowing via JSON object key inspection (narrowsTo) and __typename",
+        "Env semantics during navigation (mkChild resets env; withEnv adds)",
+        "Rooted vs nested cursors in effects and the circeCursor/Path.from choice",
+        "Relationship to other backends: CirceMappingLike as a shared trait, reuse in SqlMappingLike"
+      ]
+    },
+    {
+      "title": "Build a read-only JSON-backed GraphQL endpoint (tutorial)",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Goal: serve a small JSON document over GraphQL with zero database",
+        "Add the grackle-circe dependency and imports",
+        "Write the schema and a json\"...\" fixture",
+        "Extend CirceMapping[IO] and wire CirceField(\"root\", data)",
+        "Add an enum, a list, and a nested object and query them",
+        "Add a custom scalar with LeafMapping",
+        "Add a computed field with CursorField + required",
+        "Run queries and read the JSON result via compileAndRun"
+      ]
+    }
+  ]
+}

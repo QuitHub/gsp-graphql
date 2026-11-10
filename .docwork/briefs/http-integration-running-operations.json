@@ -1,0 +1,288 @@
+{
+  "subsystem": "HTTP integration & running operations",
+  "summary": "This subsystem is the \"serve a Mapping over HTTP\" story. A `Mapping[F]` is a self-contained GraphQL endpoint: it exposes `compileAndRun` (single query/mutation -> one JSON response), `compileAndRunSubscription` (subscription -> fs2 `Stream[F, Json]` of responses), plus the lower-level `compiler`/`interpreter` that parse GraphQL text, bind variables, and produce a spec-shaped `{\"data\": ..., \"errors\": ...}` JSON envelope. These run-methods are transport-agnostic; Grackle ships no HTTP layer of its own. The canonical wiring lives in the `demo` module, which hand-rolls http4s routes (`GraphQLService.mkRoutes`) for GraphQL-over-HTTP GET and POST, an Ember server (`DemoServer.mkServer`), and an `IOApp` (`Main`). There is no built-in websocket / graphql-ws transport in the repo today; subscriptions are exposed only through the `Stream` API, and the demo server itself serves only GET/POST plus the static GraphQL Playground assets.",
+  "keyConcepts": [
+    {
+      "name": "Mapping as the runnable endpoint",
+      "explanation": "A `Mapping[F]` bundles a `Schema`, `typeMappings`, a lazily-built `compiler: QueryCompiler` and an `interpreter: QueryInterpreter[F]`. Everything you need to execute a query is on the mapping instance; `compileAndRun`/`compileAndRunSubscription` are the public entry points. You typically construct one mapping per GraphQL endpoint and route HTTP requests to it."
+    },
+    {
+      "name": "compileAndRun vs compileAndRunSubscription",
+      "explanation": "`compileAndRunSubscription` is the primitive: it returns a `Stream[F, Json]` (one element per query/mutation, many elements for a subscription). `compileAndRun` is defined in terms of it: it runs the stream, asserts exactly one element, and `raiseError`s otherwise. So `compileAndRun` is for queries/mutations; subscriptions must use the streaming variant or they will fail at runtime with 'Result stream contained N results'."
+    },
+    {
+      "name": "The GraphQL request triad: query / operationName / variables",
+      "explanation": "A GraphQL-over-HTTP request carries the query text (`text`/`query`), an optional `operationName` (`name`) used to pick one operation when the document defines several, and optional `variables` as a JSON object (`untypedVars: Option[Json]`). The demo extracts these from the URL query string (GET) or the JSON body (POST) and forwards them to `compileAndRun(query, op, vars)`."
+    },
+    {
+      "name": "Compile then interpret pipeline",
+      "explanation": "`compileAndRunSubscription` calls `compiler.compile(text, name, untypedVars, introspectionLevel, reportUnused, env): Result[Operation]`, then `interpreter.run(op.query, op.rootTpe, env): Stream[F, Result[Json]]`, then `mkResponse` to turn each `Result[Json]` into the final envelope. Compilation does parsing, variable/fragment validation, field-merge validation, variable binding, directive validation, and the elaborator phases."
+    },
+    {
+      "name": "The Operation type",
+      "explanation": "`Operation(query: Query, rootTpe: NamedType, directives: List[Directive])` is the compiled, executable form returned by the compiler: an elaborated query-algebra `Query`, the resolved root operation type (Query/Mutation/Subscription type from the schema), and any operation-level directives. `UntypedOperation` (with `UntypedQuery`/`UntypedMutation`/`UntypedSubscription` cases) is the pre-compilation parser output."
+    },
+    {
+      "name": "GraphQL response envelope (mkResponse)",
+      "explanation": "`mkResponse` builds the spec response JSON: `{\"data\": ...}` on success, `{\"errors\": [...]}` (and optionally `data`) on failure, and `{\"errors\":[{\"message\":\"Invalid query\"}]}` when there is neither data nor errors. Crucially, a `Result.InternalError` is NOT turned into JSON: `mkResponse(result: Result[Json])` calls `M.raiseError`, so internal errors propagate as effect failures (HTTP 500 via http4s error handling), while GraphQL validation errors come back as a normal 200 with an `errors` array."
+    },
+    {
+      "name": "IntrospectionLevel",
+      "explanation": "`compileAndRun`/compile take `introspectionLevel: IntrospectionLevel = Full`. `IntrospectionLevel` (in `compiler.scala`) has `Full`, `TypenameOnly`, and `Disabled`. `Full` lets clients run the standard `IntrospectionQuery` (needed by Playground/GraphiQL); `Disabled` rejects `__schema`/`__type` introspection; `TypenameOnly` allows only `__typename`."
+    },
+    {
+      "name": "Env threading",
+      "explanation": "All run/compile methods accept `env: Env = Env.empty`. This is request-scoped context (e.g. auth/tenant info) made available to elaborators and effectful root fields. The demo does not use it, but tests show `compileAndRun(query, env = Env(\"secure\" -> true))` reaching a `CursorField`/effect handler via `env.get`."
+    },
+    {
+      "name": "http4s wiring (demo)",
+      "explanation": "`GraphQLService.mkRoutes[F: Concurrent](prefix)(mapping)` builds `HttpRoutes[F]` with a GET case (query/operationName/variables from the query string, variables decoded via a custom `QueryParamDecoder[Json]`) and a POST case (decode body `as[Json]`, pull `query`/`operationName`/`variables` fields). `DemoServer.mkServer` wraps routes with a static-asset route (Playground), `Logger`, `ErrorHandling`, and an `EmberServerBuilder` on 0.0.0.0:8080. `Main` constructs each mapping as a `Resource`, maps it through `mkRoutes`, combines routes with `<+>`, and `useForever`s the server."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Mapping.compileAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRun(\n    text: String,\n    name: Option[String] = None,\n    untypedVars: Option[Json] = None,\n    introspectionLevel: IntrospectionLevel = Full,\n    reportUnused: Boolean = true,\n    env: Env = Env.empty)(\n    implicit sc: Compiler[F, F]\n): F[Json]",
+      "purpose": "Compile and run a single GraphQL query or mutation, yielding one JSON response. Internally runs compileAndRunSubscription and asserts the result stream has exactly one element."
+    },
+    {
+      "name": "Mapping.compileAndRunSubscription",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def compileAndRunSubscription(\n    text: String,\n    name: Option[String] = None,\n    untypedVars: Option[Json] = None,\n    introspectionLevel: IntrospectionLevel = Full,\n    reportUnused: Boolean = true,\n    env: Env = Env.empty): Stream[F, Json]",
+      "purpose": "Compile and run a GraphQL operation as a stream of JSON responses. The natural entry point for subscriptions (one element per emission); also works for queries/mutations (single element)."
+    },
+    {
+      "name": "Mapping.combineAndRun",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def combineAndRun(queries: List[(Query, Cursor)]): F[Result[List[ProtoJson]]]",
+      "purpose": "Lower-level staging hook: combine and execute multiple already-compiled queries, each in the context of its paired Cursor. Used internally at stage boundaries to evaluate deferred subqueries; mappings can override to batch. Not part of the normal HTTP path."
+    },
+    {
+      "name": "Mapping.mkResponse (Result)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def mkResponse(result: Result[Json]): F[Json]",
+      "purpose": "Turn a Result[Json] into the GraphQL response effect. Raises the underlying Throwable on Result.InternalError; otherwise produces the data/errors envelope. This is why internal errors become HTTP 500s while validation errors become 200 + errors array."
+    },
+    {
+      "name": "Mapping.mkResponse (data/errors)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def mkResponse(data: Option[Json], errors: Chain[Problem]): Json",
+      "purpose": "Pure builder of the GraphQL response JSON: {data}, {errors}(+data), or a fallback {errors:[Invalid query]} when both are absent."
+    },
+    {
+      "name": "Mapping.compiler",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "lazy val compiler: QueryCompiler",
+      "purpose": "The mapping's QueryCompiler, built from queryParser + schema + compilerPhases. Accessing it runs unsafeValidateIfChecked() on the type mappings (validation happens on first use)."
+    },
+    {
+      "name": "Mapping.interpreter",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "val interpreter: QueryInterpreter[F] = new QueryInterpreter(this)",
+      "purpose": "The mapping's QueryInterpreter, which executes a compiled Operation's Query against rootTpe."
+    },
+    {
+      "name": "QueryCompiler.compile",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def compile(\n    text: String,\n    name: Option[String] = None,\n    untypedVars: Option[Json] = None,\n    introspectionLevel: IntrospectionLevel = Full,\n    reportUnused: Boolean = true,\n    env: Env = Env.empty): Result[Operation]",
+      "purpose": "Parse + validate + elaborate GraphQL text into an executable Operation. Selects a single operation by name when the document has several; fails with 'Operation name required to select unique operation' / 'No operation named ...' otherwise."
+    },
+    {
+      "name": "QueryInterpreter.run",
+      "file": "modules/core/src/main/scala/queryinterpreter.scala",
+      "signature": "def run(query: Query, rootTpe: Type, env: Env): Stream[F, Result[Json]]",
+      "purpose": "Fully interpret a compiled query against its root type, returning a stream of results. Dispatches to runSubscription when rootTpe is the schema's subscription type, else a single runOneShot."
+    },
+    {
+      "name": "QueryParser.parseText",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "def parseText(text: String): Result[(List[UntypedOperation], List[UntypedFragment])]",
+      "purpose": "Parse GraphQL document text into untyped operations + fragments (the pre-compile AST). Fails with 'At least one operation required' if empty."
+    },
+    {
+      "name": "Operation",
+      "file": "modules/core/src/main/scala/operation.scala",
+      "signature": "case class Operation(\n    query: Query,\n    rootTpe: NamedType,\n    directives: List[Directive]\n)",
+      "purpose": "The compiled, executable operation: elaborated query-algebra term, resolved root operation type, and operation-level directives. Output of QueryCompiler.compile."
+    },
+    {
+      "name": "UntypedOperation",
+      "file": "modules/core/src/main/scala/operation.scala",
+      "signature": "sealed trait UntypedOperation {\n  val name: Option[String]\n  val query: Query\n  val variables: UntypedVarDefs\n  val directives: List[Directive]\n  def rootTpe(schema: Schema): Result[NamedType]\n}",
+      "purpose": "Parser-level operation with cases UntypedQuery / UntypedMutation / UntypedSubscription; rootTpe resolves Query/Mutation/Subscription type from the schema (failing if no mutation/subscription type is defined)."
+    },
+    {
+      "name": "IntrospectionLevel",
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "signature": "sealed trait IntrospectionLevel\nobject IntrospectionLevel {\n  case object Full extends IntrospectionLevel\n  case object TypenameOnly extends IntrospectionLevel\n  case object Disabled extends IntrospectionLevel\n}",
+      "purpose": "Controls how much GraphQL introspection (__schema/__type/__typename) the compiler permits for a request."
+    },
+    {
+      "name": "GraphQLService.mkRoutes",
+      "file": "demo/src/main/scala/demo/GraphQLService.scala",
+      "signature": "def mkRoutes[F[_]: Concurrent](prefix: String)(mapping: Mapping[F]): HttpRoutes[F]",
+      "purpose": "Demo http4s routes exposing a Mapping over GraphQL-over-HTTP GET (query/operationName/variables in the URI) and POST (in a JSON body)."
+    },
+    {
+      "name": "DemoServer.mkServer",
+      "file": "demo/src/main/scala/demo/DemoServer.scala",
+      "signature": "def mkServer(graphQLRoutes: HttpRoutes[IO]): Resource[IO, Unit]",
+      "purpose": "Demo Ember server: combines static Playground assets with the GraphQL routes, adds logging + total error handling, binds 0.0.0.0:8080."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Run a query and a mutation against a Mapping (no DB)",
+      "code": "import cats.effect.IO\nimport io.circe.Json\nimport io.circe.literal._\nimport grackle.Mapping\n\n// `map: Mapping[IO]` is any constructed mapping (see SubscriptionSuite for one).\nval prog: IO[Json] =\n  for {\n    r0 <- map.compileAndRun(\"query { get }\")\n    r1 <- map.compileAndRun(\"mutation { put(n: 42) }\")\n  } yield r1\n\n// r1 == json\"\"\"{ \"data\": { \"put\": 42 } }\"\"\"",
+      "explanation": "compileAndRun returns F[Json] already wrapped in the GraphQL {\"data\": ...} envelope. Distilled from modules/core/src/test/scala/subscription/SubscriptionSuite.scala (tests 'sanity check get' / 'sanity check put').",
+      "needsDb": false
+    },
+    {
+      "title": "Run a query with variables and an operation name",
+      "code": "import io.circe.literal._\n\nval query = \"\"\"\n  query getType($name: String!) {\n    __type(name: $name) {\n      name\n      fields { name type { name } }\n    }\n  }\n\"\"\"\nval variables = json\"\"\"{ \"name\": \"User\" }\"\"\"\n\nval res = TestMapping.compileAndRun(query, untypedVars = Some(variables))\n// Or to pick a named operation from a multi-op document:\n// TestMapping.compileAndRun(query, name = Some(\"getType\"), untypedVars = Some(variables))",
+      "explanation": "Variables are passed as a circe Json object via untypedVars; operationName via name. Verbatim from modules/core/src/test/scala/introspection/IntrospectionSuite.scala ('simple type query with variables').",
+      "needsDb": false
+    },
+    {
+      "title": "Subscribe to a stream of results",
+      "code": "import scala.concurrent.duration._\nimport cats.effect.IO\nimport io.circe.Json\n\nval prog: IO[List[Json]] =\n  for {\n    ref <- fs2.concurrent.SignallingRef[IO, Int](0)\n    map  = mapping(ref)\n    fib <- map\n      .compileAndRunSubscription(\"subscription { watch }\")\n      .take(4)\n      .compile\n      .toList\n      .start\n    _ <- IO.sleep(100.milli)\n    _ <- map.compileAndRun(\"mutation { put(n: 123) }\")\n    out <- fib.join\n    res <- out.embedNever\n  } yield res",
+      "explanation": "compileAndRunSubscription returns Stream[F, Json]; each upstream change emits a new response. From modules/core/src/test/scala/subscription/SubscriptionSuite.scala ('subscription'). Using compileAndRun on a subscription would throw 'Result stream contained N results'.",
+      "needsDb": false
+    },
+    {
+      "title": "Pass request-scoped context via Env",
+      "code": "import grackle.Env\n\nval res = EnvironmentMapping.compileAndRun(\n  \"query { nested { url } }\",\n  env = Env(\"secure\" -> true))\n// reaches a CursorField/effect handler that does env.get[Boolean](\"secure\")",
+      "explanation": "env threads per-request values (auth, tenancy, feature flags) into elaborators and effectful fields. From modules/core/src/test/scala/compiler/EnvironmentSuite.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Expose a Mapping over http4s (GET + POST)",
+      "code": "import cats.effect.Concurrent\nimport io.circe.{parser, Json, ParsingFailure}\nimport org.http4s.{HttpRoutes, InvalidMessageBodyFailure, ParseFailure, QueryParamDecoder}\nimport org.http4s.circe._\nimport org.http4s.dsl.Http4sDsl\nimport grackle.Mapping\n\ndef mkRoutes[F[_]: Concurrent](prefix: String)(mapping: Mapping[F]): HttpRoutes[F] = {\n  val dsl = new Http4sDsl[F] {}; import dsl._\n\n  implicit val jsonQPDecoder: QueryParamDecoder[Json] =\n    QueryParamDecoder[String].emap { s =>\n      parser.parse(s).leftMap { case ParsingFailure(msg, _) => ParseFailure(\"Invalid variables\", msg) }\n    }\n  object QueryMatcher extends QueryParamDecoderMatcher[String](\"query\")\n  object OperationNameMatcher extends OptionalQueryParamDecoderMatcher[String](\"operationName\")\n  object VariablesMatcher extends OptionalValidatingQueryParamDecoderMatcher[Json](\"variables\")\n\n  HttpRoutes.of[F] {\n    case GET -> Root / `prefix` :? QueryMatcher(query) +& OperationNameMatcher(op) +& VariablesMatcher(vars0) =>\n      vars0.sequence.fold(\n        errors => BadRequest(errors.map(_.sanitized).mkString_(\"\", \",\", \"\")),\n        vars => for { result <- mapping.compileAndRun(query, op, vars); resp <- Ok(result) } yield resp)\n\n    case req @ POST -> Root / `prefix` =>\n      for {\n        body  <- req.as[Json]\n        obj   <- body.asObject.liftTo[F](InvalidMessageBodyFailure(\"Invalid GraphQL query\"))\n        query <- obj(\"query\").flatMap(_.asString).liftTo[F](InvalidMessageBodyFailure(\"Missing query field\"))\n        op    = obj(\"operationName\").flatMap(_.asString)\n        vars  = obj(\"variables\")\n        result <- mapping.compileAndRun(query, op, vars)\n        resp   <- Ok(result)\n      } yield resp\n  }\n}",
+      "explanation": "Verbatim from demo/src/main/scala/demo/GraphQLService.scala. GET reads query/operationName/variables from the URI (variables URL-decoded then JSON-parsed); POST reads them from a JSON body. Both call mapping.compileAndRun(query, op, vars).",
+      "needsDb": false
+    },
+    {
+      "title": "Boot an Ember server serving one or more mappings",
+      "code": "import cats.effect.{ExitCode, IO, IOApp}\nimport cats.syntax.all._\nimport demo.DemoServer.mkServer\nimport demo.GraphQLService.mkRoutes\n\nobject Main extends IOApp {\n  def run(args: List[String]): IO[ExitCode] =\n    (for {\n      starWarsRoutes <- StarWarsMapping[IO].map(mkRoutes(\"starwars\"))\n      worldRoutes    <- WorldMapping[IO].map(mkRoutes(\"world\"))\n      _              <- mkServer(starWarsRoutes <+> worldRoutes)\n    } yield ()).useForever\n}",
+      "explanation": "From demo/src/main/scala/demo/Main.scala. Each mapping is built as a Resource, lifted to routes under a path prefix, combined with <+>, and served. mkServer (DemoServer.scala) binds 0.0.0.0:8080 and also serves the GraphQL Playground static assets. WorldMapping is Postgres-backed, so running this Main end-to-end needs a database.",
+      "needsDb": true
+    }
+  ],
+  "gotchas": [
+    "compileAndRun on a subscription fails at runtime, not compile time: it collects the result stream and raises IllegalStateException 'Result stream contained N results; expected exactly one.' (or 'Result stream was empty.'). Use compileAndRunSubscription for subscriptions.",
+    "Grackle ships NO HTTP or websocket transport. The entire http4s/Ember wiring lives in the demo module and is example code you copy, not a published API. There is no graphql-ws / graphql-transport-ws implementation anywhere in the repo; subscriptions are only reachable via the Stream returned by compileAndRunSubscription. Wiring that to a websocket is left to you.",
+    "Internal errors do not become GraphQL error JSON. mkResponse(result) calls M.raiseError on Result.InternalError, so it surfaces as an effect failure -> HTTP 500 (the demo catches it with ErrorHandling.Recover.total + Logger). Only GraphQL validation/execution failures (Result failures) are returned as a normal 200 response with an \"errors\" array.",
+    "Multi-operation documents require operationName. If the document defines more than one operation you MUST pass name; otherwise compile fails with 'Operation name required to select unique operation'. With a single operation, name may be None. Also 'Query shorthand cannot be combined with multiple operations' and 'No operation named ...'/'Multiple operations named ...' are possible failures.",
+    "variables must be a JSON object (Option[Json]). compileVars fails with 'Variables must be represented as a Json object' if you pass a non-object Json. In the demo's GET route, variables arrive as a URL-encoded JSON string and are parsed by a custom QueryParamDecoder[Json]; a malformed value yields a 400 BadRequest ('Invalid variables'), separate from GraphQL validation.",
+    "reportUnused defaults to true: unused variables/fragments are reported (as warnings/errors accumulated in the Result). Set reportUnused = false to silence that during variable/fragment validation.",
+    "Schema validation is deferred to first use. The compiler is a lazy val and calling it runs typeMappings.unsafeValidateIfChecked(); a mis-specified mapping won't blow up until the first request is compiled (unless you force the compiler earlier).",
+    "IntrospectionLevel defaults to Full. GraphQL client tools (Playground/GraphiQL) issue an IntrospectionQuery; setting Disabled (or TypenameOnly) will break their schema discovery while still allowing normal queries.",
+    "The demo's POST handler only reads top-level fields query/operationName/variables and requires query to be present (InvalidMessageBodyFailure 'Missing query field'); it does not implement batched operations or persisted queries.",
+    "Routes are combined with the SemigroupK <+> (from cats) on HttpRoutes, and DemoServer wraps everything in orNotFound, Logger, and a *total* ErrorHandling.Recover so uncaught throwables are logged rather than crashing the server."
+  ],
+  "snipSources": [
+    {
+      "file": "demo/src/main/scala/demo/GraphQLService.scala",
+      "region": "#service (whole object, already tagged with // #service ... // #service)",
+      "whatItShows": "Complete http4s HttpRoutes for GraphQL-over-HTTP GET and POST against a Mapping, including the variables QueryParamDecoder. The canonical 'wire a Mapping to routes' snippet; already referenced by the tutorial via Output.snip(...,\"#service\")."
+    },
+    {
+      "file": "demo/src/main/scala/demo/DemoServer.scala",
+      "region": "#server (whole object, tagged // #server)",
+      "whatItShows": "Ember server setup: static Playground assets <+> GraphQL routes, orNotFound, Logger, total ErrorHandling, bind 0.0.0.0:8080. Already snip-tagged."
+    },
+    {
+      "file": "demo/src/main/scala/demo/Main.scala",
+      "region": "#main (whole object, tagged // #main)",
+      "whatItShows": "IOApp that builds mappings as Resources, lifts each to routes under a prefix, combines with <+>, and runs the server forever. Already snip-tagged."
+    },
+    {
+      "file": "modules/core/src/test/scala/subscription/SubscriptionSuite.scala",
+      "region": "tests 'sanity check get'/'sanity check put'/'serial execution'/'subscription' (lines ~87-257) plus the inline ValueMapping at lines 33-85",
+      "whatItShows": "Self-contained, compiling examples of compileAndRun (query + mutation, serial mutations) and compileAndRunSubscription (streaming) with the exact expected JSON envelopes. Best ground-truth source for running operations without a DB."
+    },
+    {
+      "file": "modules/core/src/test/scala/introspection/IntrospectionSuite.scala",
+      "region": "test 'simple type query with variables' (lines ~107-155)",
+      "whatItShows": "compileAndRun(query, untypedVars = Some(variables)) with a real $name variable and expected data envelope; also good for documenting introspection responses."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/EnvironmentSuite.scala",
+      "region": "tests around lines 256-308",
+      "whatItShows": "compileAndRun(query, env = Env(\"secure\" -> ...)) demonstrating request-scoped Env threading into field resolution."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "compileAndRun / compileAndRunSubscription / mkResponse (lines 58-97 and 1524-1547)",
+      "whatItShows": "Authoritative signatures and the compile->interpret->mkResponse pipeline, including the InternalError-raises vs validation-error-as-JSON behavior."
+    },
+    {
+      "file": "docs/tutorial/in-memory-model.md",
+      "region": "## The service / ## Putting it all together (lines ~305-351)",
+      "whatItShows": "Existing prose + snip directives describing the GET/POST request shapes, the IntrospectionQuery requirement, and running on Ember/Playground. A natural base for the how-to page."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Running operations on a Mapping: compileAndRun, compileAndRunSubscription, run",
+      "diataxisType": "reference",
+      "outline": [
+        "compileAndRun signature, parameters (text, name, untypedVars, introspectionLevel, reportUnused, env) and return F[Json]",
+        "compileAndRunSubscription signature and Stream[F, Json] semantics; relationship to compileAndRun (exactly-one-element contract)",
+        "The compile -> interpret -> mkResponse pipeline (QueryCompiler.compile -> QueryInterpreter.run -> mkResponse)",
+        "The GraphQL response envelope: data/errors shapes and the InternalError-raises rule",
+        "IntrospectionLevel (Full / TypenameOnly / Disabled) and reportUnused",
+        "Env parameter for request-scoped context",
+        "combineAndRun (staging hook) — brief note that it's not part of the normal HTTP path"
+      ]
+    },
+    {
+      "title": "The Operation type and the parse/compile model",
+      "diataxisType": "reference",
+      "outline": [
+        "UntypedOperation trait + UntypedQuery/UntypedMutation/UntypedSubscription cases; rootTpe(schema)",
+        "Operation(query, rootTpe, directives) as the compiled executable form",
+        "QueryParser.parseText and what 'parse' vs 'compile' mean",
+        "Operation selection: single operation vs operationName, and the failure messages",
+        "Variable binding (compileVarDefs/compileVars) and the 'variables must be a JSON object' rule"
+      ]
+    },
+    {
+      "title": "Serve a Mapping over HTTP with http4s",
+      "diataxisType": "how-to",
+      "outline": [
+        "Goal: expose a Mapping[F] as a GraphQL endpoint",
+        "Build the GET + POST routes (mkRoutes), reading query/operationName/variables",
+        "Variables decoding for GET (custom QueryParamDecoder[Json]) and BadRequest handling",
+        "Building the Ember server (mkServer): static Playground assets, Logger, total ErrorHandling, bind address/port",
+        "Wiring multiple mappings under path prefixes and combining with <+> in an IOApp",
+        "Required dependencies (http4s-ember-server, http4s-circe, http4s-dsl) from build.sbt",
+        "Note: copy-this-code; Grackle provides no HTTP module"
+      ]
+    },
+    {
+      "title": "Exposing subscriptions (and the websocket gap)",
+      "diataxisType": "explanation",
+      "outline": [
+        "Why subscriptions return Stream[F, Json] and must use compileAndRunSubscription",
+        "Mapping subscriptions to a transport is up to you; Grackle ships no graphql-ws transport",
+        "The demo serves only GET/POST — subscriptions are not exposed over HTTP there",
+        "How RootStream/RootEffect drive emissions (pointer to the effects subsystem)",
+        "Sketch of bridging the Stream to an http4s websocket / SSE (conceptual, since no in-repo example exists)"
+      ]
+    },
+    {
+      "title": "End-to-end: GraphQL server tutorial",
+      "diataxisType": "tutorial",
+      "outline": [
+        "Construct a Mapping (reuse the in-memory StarWars/Value mapping)",
+        "Add mkRoutes and mkServer",
+        "Run it, open GraphQL Playground, send a query",
+        "Send a query with variables; send a mutation",
+        "Observe data vs errors responses; trigger a validation error",
+        "Pointers to the db-backed (Postgres) variant which needs a live database"
+      ]
+    }
+  ]
+}

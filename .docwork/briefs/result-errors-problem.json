@@ -1,0 +1,381 @@
+{
+  "subsystem": "Result, errors & Problem",
+  "summary": "Grackle models the outcome of every fallible operation (parsing, compilation, elaboration, query interpretation, validation, effects) as `Result[A]` — an `Ior`-like ADT with four cases: `Success` (value only), `Warning` (value + a non-empty chain of `Problem`s), `Failure` (problems only, no value), and `InternalError` (a `Throwable` representing a bug/unexpected condition, not a user-facing GraphQL error). `Problem` is the GraphQL-spec-shaped error object (message, locations, path, extensions) that gets serialised into the `errors` array of a response. The companion provides constructors and conversions, while `ResultInstances` supplies cats typeclass instances (`MonadError`, `Traverse`, `Parallel`, `Semigroup`, `Eq`) so results compose with `for`/`traverse`/`parMapN` and accumulate problems. At the response boundary `Mapping.mkResponse` folds a `Result[Json]` into a GraphQL response: `Success`→`{data}`, `Warning`→`{errors,data}`, `Failure`→`{errors}` (no data), and `InternalError`→raised into the effect `F`. `ValidationFailure` is a separate, schema/mapping-construction-time diagnostic type (with `Severity`) used for richly-formatted, colourised validation messages, distinct from runtime `Problem`s.",
+  "keyConcepts": [
+    {
+      "name": "Four-case Result ADT (Ior semantics)",
+      "explanation": "Result[+T] is sealed with Success(value), Warning(problems, value), Failure(problems) and InternalError(error). It generalises Either/Ior: Warning carries BOTH a value and accumulated problems (like Ior.Both), Failure carries only problems, and InternalError is a fourth case for Throwables that escape the normal problem channel. hasValue is true for Success/Warning; hasProblems is true for Warning/Failure; isInternalError isolates the bug case."
+    },
+    {
+      "name": "Problem vs InternalError vs ValidationFailure",
+      "explanation": "Problem is a user-facing GraphQL error (serialised into the errors array). InternalError wraps a Throwable that should surface as an effect-level failure (M.raiseError in mkResponse), NOT as a GraphQL error — it represents an internal bug/unexpected state. ValidationFailure (with Severity Error/Warning/Info) is a third, unrelated diagnostic used only when building/validating a Schema or Mapping; ValidationException wraps a NonEmptyList of them."
+    },
+    {
+      "name": "Problem accumulation via Semigroup/Applicative",
+      "explanation": "Problems accumulate as a NonEmptyChain[Problem]. flatMap and the MonadError carry warnings forward and merge problem chains; the Parallel/Applicative ap and the Semigroup combine accumulate problems from both sides (Failure ++ Failure = Failure with both, but a short-circuit on InternalError). This is how multiple validation/compilation errors are reported at once rather than failing on the first."
+    },
+    {
+      "name": "Result combinators & syntax",
+      "explanation": "Instance methods: map, flatMap, traverse, fold, foldLeft/Right, toEither, toOption, withProblems, combine, getOrElse, plus predicates hasValue/isFailure/hasProblems/isInternalError/toProblems. Companion constructors: apply/pure/success, warning, failure, internalError, fromOption, fromEither, fromProblems, catchNonFatal, combineAllWithDefault. Extension syntax in grackle.syntax: a.success, opt.toResult(ifNone), opt.toResultOrError(ifNone)."
+    },
+    {
+      "name": "ResultT monad transformer",
+      "explanation": "ResultT[F[_], A](value: F[Result[A]]) lifts Result into an effect F (typically a cats-effect IO or fs2 Stream). It is used pervasively in the interpreter/mapping to thread Result through F with for-comprehensions; it preserves Warning/Failure/InternalError propagation and problem accumulation across the F boundary. Constructors: liftF, pure, fromResult, success, warning, failure, internalError."
+    },
+    {
+      "name": "Mapping failures to the GraphQL response",
+      "explanation": "Mapping.mkResponse(result: Result[Json]): F[Json] is the single boundary that turns a Result into a spec response. Success→{\"data\":..}; Warning→{\"errors\":[..],\"data\":..} (errors AND data present); Failure→{\"errors\":[..]} (no data key); InternalError→M.raiseError(throwable). The overload mkResponse(data, errors) also emits a synthetic {\"errors\":[{\"message\":\"Invalid query\"}]} when both data and errors are empty."
+    },
+    {
+      "name": "Severity ordering for validation",
+      "explanation": "ValidationFailure.Severity is a sealed trait (Error > Warning > Info) with a cats Order instance (Error=3, Warning=2, Info=1), letting validators filter/threshold diagnostics by severity (e.g. only fail on Error, surface Warning/Info)."
+    }
+  ],
+  "keyTypes": [
+    {
+      "name": "Result[+T]",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "sealed trait Result[+T]",
+      "purpose": "The core fallible-outcome type; Ior-like ADT over a value of type T and/or accumulated Problems, plus an InternalError case for Throwables."
+    },
+    {
+      "name": "Result.Success",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "final case class Success[+T](value: T) extends Result[T]",
+      "purpose": "A successful result carrying only a value (no problems)."
+    },
+    {
+      "name": "Result.Warning",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "final case class Warning[+T](problems: NonEmptyChain[Problem], value: T) extends Result[T]",
+      "purpose": "A result carrying BOTH a value and a non-empty chain of problems; surfaces as data + errors in the response."
+    },
+    {
+      "name": "Result.Failure",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "final case class Failure(problems: NonEmptyChain[Problem]) extends Result[Nothing]",
+      "purpose": "A failed result carrying only problems and no value; surfaces as errors-only response."
+    },
+    {
+      "name": "Result.InternalError",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "final case class InternalError(error: Throwable) extends Result[Nothing]",
+      "purpose": "An internal/unexpected error wrapping a Throwable; raised into the effect F rather than reported as a GraphQL error."
+    },
+    {
+      "name": "Result.fold",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def fold[U](failure: NonEmptyChain[Problem] => U, success: T => U, warning: (NonEmptyChain[Problem], T) => U, error: Throwable => U): U",
+      "purpose": "Exhaustive eliminator handling all four cases."
+    },
+    {
+      "name": "Result.flatMap",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def flatMap[U](f: T => Result[U]): Result[U]",
+      "purpose": "Monadic bind; merges/propagates warning problem chains and short-circuits on Failure/InternalError."
+    },
+    {
+      "name": "Result.withProblems",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def withProblems(problems: NonEmptyChain[Problem]): Result[T]",
+      "purpose": "Attach extra problems: Success becomes Warning, Warning/Failure accumulate, InternalError is unchanged."
+    },
+    {
+      "name": "Result.combine",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def combine[U >: T](that: Result[U])(implicit S: Semigroup[U]): Result[U]",
+      "purpose": "Semigroup combine that merges values via S and accumulates problems across both sides (downgrading Failure to Warning when the other side has a value)."
+    },
+    {
+      "name": "Result.toProblems",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def toProblems: Chain[Problem]",
+      "purpose": "Extract accumulated problems as a Chain (empty for Success/InternalError); used by mkResponse to build the errors array."
+    },
+    {
+      "name": "Result.toEither",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def toEither: Either[Either[Throwable, NonEmptyChain[Problem]], T]",
+      "purpose": "Convert to a nested Either where the left distinguishes InternalError (inner Left) from Failure (inner Right)."
+    },
+    {
+      "name": "Result.failure",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def failure[A](s: String): Result[A]   /   def failure[A](p: Problem): Result[A]",
+      "purpose": "Construct a Failure from a message string or an explicit Problem."
+    },
+    {
+      "name": "Result.warning",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def warning[A](warning: Problem, value: A): Result[A]   /   def warning[A](warning: String, value: A): Result[A]",
+      "purpose": "Construct a Warning from a single problem/message plus a value."
+    },
+    {
+      "name": "Result.internalError",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def internalError[A](err: Throwable): Result[A]   /   def internalError[A](err: String): Result[A]",
+      "purpose": "Construct an InternalError from a Throwable, or wrap a String in a new Throwable."
+    },
+    {
+      "name": "Result.fromOption",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def fromOption[A](oa: Option[A], ifNone: => Problem): Result[A]",
+      "purpose": "Lift an Option, producing a Failure (ifNone) when empty. There is a String overload guarded by a DummyImplicit."
+    },
+    {
+      "name": "Result.fromEither",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def fromEither[A](ea: Either[Problem, A]): Result[A]",
+      "purpose": "Lift an Either, mapping Left to Failure. A String-left overload exists (DummyImplicit-guarded)."
+    },
+    {
+      "name": "Result.fromProblems",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def fromProblems(problems: Seq[Problem]): Result[Unit]   /   def fromProblems(problems: Chain[Problem]): Result[Unit]",
+      "purpose": "Yield Result.unit when there are no problems, otherwise a Failure; used to fold validation problem lists into a Result."
+    },
+    {
+      "name": "Result.catchNonFatal",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def catchNonFatal[T](body: => T): Result[T]",
+      "purpose": "Run a thunk, returning Success or, on a NonFatal throwable, InternalError."
+    },
+    {
+      "name": "Result.combineAllWithDefault",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "def combineAllWithDefault[T](ress: List[Result[T]], default: => T): Result[List[T]]",
+      "purpose": "Combine a list of results preserving order/length by substituting a default for failed elements, accumulating all problems; returns the first InternalError if any."
+    },
+    {
+      "name": "grackleMonadErrorForResult",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "implicit val grackleMonadErrorForResult: MonadError[Result, Either[Throwable, NonEmptyChain[Problem]]]",
+      "purpose": "cats MonadError instance; the error type Either[Throwable, NEC[Problem]] unifies InternalError (left) and Failure (right) for raiseError/handleErrorWith."
+    },
+    {
+      "name": "grackleParallelForResult",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "implicit def grackleParallelForResult[E]: Parallel.Aux[Result, Result]",
+      "purpose": "Parallel instance whose Applicative ap accumulates problems from both operands (enables parMapN error accumulation)."
+    },
+    {
+      "name": "grackleSemigroupForResult / grackleEqForResult / grackleTraverseFunctorForResult",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "implicit def grackleSemigroupForResult[A: Semigroup]: Semigroup[Result[A]]; implicit def grackleEqForResult[A: Eq]: Eq[Result[A]]; implicit val grackleTraverseFunctorForResult: Traverse[Result]",
+      "purpose": "Semigroup (via combine), Eq (via ===), and Traverse instances for Result."
+    },
+    {
+      "name": "ResultT[F[_], A]",
+      "file": "modules/core/src/main/scala/result.scala",
+      "signature": "final case class ResultT[F[_], A](value: F[Result[A]])",
+      "purpose": "Monad transformer stacking Result inside an effect F; map/flatMap preserve problem accumulation. Companion provides liftF/pure/fromResult/success/warning/failure/internalError."
+    },
+    {
+      "name": "Problem",
+      "file": "modules/core/src/main/scala/problem.scala",
+      "signature": "final case class Problem(message: String, locations: List[(Int, Int)] = Nil, path: List[String] = Nil, extensions: Option[JsonObject] = None)",
+      "purpose": "GraphQL-spec error object. Has a human-readable toString and a circe Encoder producing the response error JSON; Eq ignores extensions."
+    },
+    {
+      "name": "Problem.ProblemEncoder",
+      "file": "modules/core/src/main/scala/problem.scala",
+      "signature": "implicit val ProblemEncoder: Encoder[Problem]",
+      "purpose": "circe encoder: emits message always, and locations/path/extensions only when non-empty; locations become {line,col} objects."
+    },
+    {
+      "name": "Mapping.mkResponse (Result overload)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def mkResponse(result: Result[Json]): F[Json]",
+      "purpose": "Boundary that turns a Result[Json] into a GraphQL response: InternalError → M.raiseError; otherwise mkResponse(result.toOption, result.toProblems)."
+    },
+    {
+      "name": "Mapping.mkResponse (data/errors overload)",
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "signature": "def mkResponse(data: Option[Json], errors: Chain[Problem]): Json",
+      "purpose": "Assemble the JSON: emits data and/or errors; when both empty emits a synthetic errors array {\"message\":\"Invalid query\"}."
+    },
+    {
+      "name": "ValidationFailure",
+      "file": "modules/core/src/main/scala/validationfailure.scala",
+      "signature": "abstract class ValidationFailure(val severity: Severity) extends AnsiColor",
+      "purpose": "Schema/mapping-construction diagnostic with a coloured, padded formattedMessage and toErrorMessage; distinct from runtime Problem."
+    },
+    {
+      "name": "ValidationFailure.Severity",
+      "file": "modules/core/src/main/scala/validationfailure.scala",
+      "signature": "sealed trait Severity extends Product  (Error, Warning, Info) with implicit Order[Severity]",
+      "purpose": "Diagnostic severity with a total ordering (Error=3 > Warning=2 > Info=1)."
+    },
+    {
+      "name": "ValidationException",
+      "file": "modules/core/src/main/scala/validationfailure.scala",
+      "signature": "final case class ValidationException(failures: NonEmptyList[ValidationFailure]) extends RuntimeException with NoStackTrace",
+      "purpose": "Throwable aggregating validation failures; its getMessage concatenates each failure's toErrorMessage."
+    },
+    {
+      "name": "syntax.ResultIdOps / ResultOptionOps",
+      "file": "modules/core/src/main/scala/syntax.scala",
+      "signature": "implicit class ResultIdOps[A](val a: A) { def success: Result[A] }; implicit class ResultOptionOps[T](val opt: Option[T]) { def toResult(ifNone: => Problem); def toResult(ifNone: => String); def toResultOrError(ifNone: => Throwable); def toResultOrError(ifNone: => String) }",
+      "purpose": "Ergonomic extension syntax (import grackle.syntax._) for lifting values/options into Result."
+    }
+  ],
+  "minimalExamples": [
+    {
+      "title": "Constructing the four Result cases",
+      "code": "import cats.data.NonEmptyChain\nimport grackle.{Problem, Result}\n\nval ok:    Result[Int] = Result.Success(42)\nval ok2:   Result[Int] = Result(42)          // == Result.success(42) == Result.pure(42)\nval warn:  Result[Int] = Result.warning(\"deprecated field used\", 42) // Warning(problems, 42)\nval fail:  Result[Int] = Result.failure(\"No field 'foo' for type Character\")\nval failP: Result[Int] = Result.failure(Problem(\"boom\", path = List(\"user\", \"name\")))\nval boom:  Result[Int] = Result.internalError(new RuntimeException(\"bug\"))\n\nassert(ok.toOption == Some(42))\nassert(warn.hasValue && warn.hasProblems)\nassert(fail.isFailure && fail.toOption.isEmpty)\nassert(boom.isInternalError)",
+      "explanation": "Shows every constructor on the Result companion and the predicates that distinguish the cases. Mirrors the Arbitrary generator in ResultSuite.scala (lines 42-54) and the failure assertions in CompilerSuite.scala.",
+      "needsDb": false
+    },
+    {
+      "title": "Problem JSON encoding (the errors array shape)",
+      "code": "import io.circe.syntax._\nimport grackle.Problem\n\n// message + locations + path\nProblem(\"foo\", List(1 -> 2, 5 -> 6), List(\"bar\", \"baz\")).asJson\n// => { \"message\":\"foo\",\n//      \"locations\":[{\"line\":1,\"col\":2},{\"line\":5,\"col\":6}],\n//      \"path\":[\"bar\",\"baz\"] }\n\n// message only (empty locations/path/extensions are omitted)\nProblem(\"foo\").asJson  // => { \"message\":\"foo\" }\n\n// human-readable form\nProblem(\"foo\", List(1 -> 2, 5 -> 6), List(\"bar\", \"baz\")).toString\n// => \"foo (at bar/baz: 1..2, 5..6)\"",
+      "explanation": "Verbatim from ProblemSuite.scala (encoding/toString tests). Empty locations/path/extensions are dropped from the JSON; a single-line location (a==b) renders as the bare number rather than a range.",
+      "needsDb": false
+    },
+    {
+      "title": "Result composes in a for-comprehension and accumulates warnings",
+      "code": "import grackle.Result\nimport grackle.syntax._   // for `.success`, `.toResult`\n\nval r: Result[Int] =\n  for {\n    a <- Result.warning(\"w1\", 1)   // Warning(w1, 1)\n    b <- 2.success                 // Success(2)\n    c <- Option(3).toResult(\"missing c\")\n  } yield a + b + c\n\n// r == Result.Warning(NonEmptyChain(Problem(\"w1\")), 6)\nassert(r.toOption == Some(6))\nassert(r.toProblems.toList.map(_.message) == List(\"w1\"))",
+      "explanation": "flatMap carries the Warning's problem chain forward while keeping the value; a Failure anywhere in the chain would short-circuit to Failure. Uses the grackle.syntax extension methods (.success, Option#toResult).",
+      "needsDb": false
+    },
+    {
+      "title": "A field-level warning surfaces as BOTH data and errors",
+      "code": "// QueryDirectivesMapping (ValueMapping[IO]) with an @upperCase directive elaborator\n// that yields Elab.warning when applied to a non-String field.\nval query = \"\"\"\n  query { user { name @upperCase  handle  age @upperCase } }\n\"\"\"\nval expected = json\"\"\"\n  {\n    \"errors\" : [ { \"message\" : \"'upperCase' directive may only be applied to fields of type String\" } ],\n    \"data\"   : { \"user\" : { \"name\" : \"MARY\", \"handle\" : \"mary\", \"age\" : 42 } }\n  }\n\"\"\"\nQueryDirectivesMapping.compileAndRun(query)  // IO[Json] == expected",
+      "explanation": "Verbatim from QueryDirectivesSuite.scala (test 'query with directive (3)', lines 116-148). Demonstrates that Result.Warning (emitted via Elab.warning during elaboration) produces a response containing BOTH the errors array and the data field — the distinguishing behaviour of Warning vs Failure.",
+      "needsDb": false
+    },
+    {
+      "title": "A compile failure becomes an errors-only response",
+      "code": "val query = \"\"\" query { root { hidden } } \"\"\"\nval expected = json\"\"\"\n  { \"errors\" : [ { \"message\" : \"No field 'hidden' for type Root\" } ] }\n\"\"\"\nTestCirceMapping.compileAndRun(query)  // IO[Json] == expected (no \"data\" key)",
+      "explanation": "Verbatim from CirceSuite.scala (lines 295-317). Compilation produced a Result.Failure, so mkResponse emits only the errors array with no data field. Contrast with the Warning example which keeps data.",
+      "needsDb": false
+    },
+    {
+      "title": "Lifting Result into an effect with ResultT",
+      "code": "import cats.effect.IO\nimport grackle.{Result, ResultT}\n\nval rt: ResultT[IO, Int] =\n  for {\n    a <- ResultT.fromResult[IO, Int](Result.success(1))\n    b <- ResultT.liftF(IO.pure(2))\n    c <- ResultT.warning[IO, Int](\"slow path\", 3)\n  } yield a + b + c\n\nval out: IO[Result[Int]] = rt.value   // IO(Result.Warning(NEC(Problem(\"slow path\")), 6))",
+      "explanation": "ResultT threads Result through an effect F; flatMap preserves Warning/Failure/InternalError accumulation. This is the pattern used throughout queryinterpreter.scala and mapping.scala (e.g. ResultT(mapping.combineAndRun(queries))). Constructors mirror the Result companion.",
+      "needsDb": false
+    }
+  ],
+  "gotchas": [
+    "InternalError is NOT a GraphQL error. mkResponse(result: Result[Json]) calls M.raiseError(err) for InternalError, so it propagates as an effect-level failure (e.g. an IO error) rather than appearing in the errors array. Use Result.failure / Problem for client-facing errors and Result.internalError only for genuine bugs/unexpected conditions.",
+    "Failure has no value, Warning does. The whole point of Warning is to keep partial data while still reporting problems — it serialises to a response with BOTH data and errors. Choosing failure vs warning during elaboration changes whether the client gets any data (see the explicit comment in QueryDirectivesSuite: 'We could make this fail the whole query by yielding Elab.failure here').",
+    "Problem equality ignores extensions. eqProblem is Eq.by(p => (p.message, p.locations, p.path)) — two Problems with different extensions compare equal. Tests relying on extensions must compare the encoded JSON (asJson), not the Problem values.",
+    "Empty locations/path/extensions vanish from the JSON. The ProblemEncoder omits any empty field, so Problem(\"foo\") encodes to just {\"message\":\"foo\"}. Don't assert on the presence of those keys when they're empty.",
+    "mkResponse(data=None, errors=empty) injects a synthetic error. If both data is absent and the error chain is empty it emits {\"errors\":[{\"message\":\"Invalid query\"}]} — an empty Result should never reach this path in normal flow, but a custom interpreter that returns no data and no problems will get this catch-all message.",
+    "combine / Semigroup downgrades Failure to Warning when the other side has a value. Result.combine of a Failure with a Success yields a Warning (problems + the success value), not a Failure. This is intentional Ior-like accumulation but can surprise callers expecting failure to dominate. InternalError, however, always dominates / short-circuits.",
+    "flatMap problem-merge order matters. In flatMap of a Warning whose continuation is a Warning, problems are concatenated as `problems ++ fps` (outer first). When relying on ordered error reporting, be aware combinators preserve a specific accumulation order (and Applicative ap orders them ff-then-fa).",
+    "Parallel/Applicative accumulate; Monad short-circuits. parMapN (via grackleParallelForResult) and the Applicative ap collect problems from all operands, but flatMap/for-comprehensions short-circuit on the first Failure/InternalError. Use parMapN / mapN / traverse when you want all errors reported at once (this is how the compiler reports multiple validation errors).",
+    "ValidationFailure is a different axis from Problem. ValidationFailure (with Severity Error/Warning/Info, ANSI colouring, ValidationException) is used at Schema/Mapping construction & validation time, not for per-request GraphQL errors. Don't confuse Result.Warning (runtime, a Problem) with Severity.Warning (a validation diagnostic).",
+    "fromOption/fromEither have DummyImplicit-disambiguated String overloads. The Problem and String variants of fromOption/fromEither (and Option#toResult) are distinguished by an implicit DummyImplicit because they'd otherwise erase to the same signature — passing the wrong by-name type can pick the unexpected overload.",
+    "Result.warning(String, value) wraps the string in a Problem with no path/locations. Warnings/failures created from bare strings have empty locations and path; positional info must be attached explicitly (e.g. via Problem(msg, locations, path)) or earlier in the pipeline, otherwise the errors array entry is message-only."
+  ],
+  "snipSources": [
+    {
+      "file": "modules/core/src/main/scala/result.scala",
+      "region": "sealed trait Result[+T] and object Result (lines 42-286)",
+      "whatItShows": "The full ADT, all instance combinators (map/flatMap/fold/combine/withProblems/toEither/toProblems/predicates) and every companion constructor (success/warning/failure/internalError/fromOption/fromEither/fromProblems/catchNonFatal/combineAllWithDefault) — canonical reference material."
+    },
+    {
+      "file": "modules/core/src/main/scala/problem.scala",
+      "region": "final case class Problem (lines 25-94) including ProblemEncoder and eqProblem",
+      "whatItShows": "Problem fields, toString formatting rules, the circe Encoder (omits empty fields, locations as {line,col}) and the extensions-ignoring Eq instance."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/ProblemSuite.scala",
+      "region": "whole file (lines 27-147)",
+      "whatItShows": "Compiling, verbatim assertions for Problem JSON encoding (full / no-path / no-locations / message-only / extensions) and toString rendering — ideal copy-paste reference examples."
+    },
+    {
+      "file": "modules/core/src/test/scala/laws/ResultSuite.scala",
+      "region": "Arbitrary[Result[T]] generator and checkAll law blocks (lines 32-73)",
+      "whatItShows": "How each Result case is constructed and which cats typeclass laws (MonadError, Traverse, Parallel, Semigroup, Eq, Applicative for ResultT) hold — authoritative for the instance surface."
+    },
+    {
+      "file": "modules/core/src/test/scala/compiler/CompilerSuite.scala",
+      "region": "'invalid:' tests, e.g. lines 307-336",
+      "whatItShows": "Idiomatic Result.Failure(NonEmptyChain(Problem(...))) assertions for compile-time GraphQL errors (unknown field, empty/invalid subselection, unknown argument, missing operation)."
+    },
+    {
+      "file": "modules/core/src/test/scala/directives/QueryDirectivesSuite.scala",
+      "region": "test 'query with directive (3)' (lines 116-148) and upperCaseElaborator (lines 186-209)",
+      "whatItShows": "End-to-end demonstration that a Result.Warning (via Elab.warning) yields a response with BOTH errors and data, including the elaborator code that emits the warning."
+    },
+    {
+      "file": "modules/circe/src/test/scala/CirceSuite.scala",
+      "region": "test around lines 295-317",
+      "whatItShows": "End-to-end errors-only response (no data key) produced by a Result.Failure from compilation — clean compileAndRun + expected-JSON snippet."
+    },
+    {
+      "file": "modules/core/src/main/scala/mapping.scala",
+      "region": "mkResponse overloads (lines 1524-1547)",
+      "whatItShows": "The exact boundary logic mapping Result→GraphQL JSON response: Success→data, Warning→errors+data, Failure→errors, InternalError→raiseError, plus the empty-case synthetic 'Invalid query'."
+    },
+    {
+      "file": "modules/core/src/main/scala/syntax.scala",
+      "region": "object syntax (lines 18-36)",
+      "whatItShows": "The ergonomic extension methods a.success, opt.toResult(ifNone), opt.toResultOrError(ifNone) available via `import grackle.syntax._`."
+    },
+    {
+      "file": "modules/core/src/main/scala/compiler.scala",
+      "region": "Elab.warning/failure/internalError (lines 866-898)",
+      "whatItShows": "How elaboration phases emit Result-backed warnings/failures/internal errors that ultimately populate the response errors array."
+    },
+    {
+      "file": "modules/core/src/main/scala/validationfailure.scala",
+      "region": "whole file (lines 27-84)",
+      "whatItShows": "ValidationFailure base class, Severity ADT + Order, and ValidationException — the construction-time diagnostic channel distinct from Problem."
+    }
+  ],
+  "docPagesSuggested": [
+    {
+      "title": "Result reference",
+      "diataxisType": "reference",
+      "outline": [
+        "The Result ADT: Success / Warning / Failure / InternalError (and what each means)",
+        "Predicates: hasValue, hasProblems, isFailure, isInternalError, toProblems",
+        "Combinators: map, flatMap, traverse, fold, combine, withProblems, getOrElse, toOption, toEither",
+        "Companion constructors: apply/pure/success, warning, failure, internalError, fromOption, fromEither, fromProblems, catchNonFatal, combineAllWithDefault",
+        "Typeclass instances: MonadError, Traverse, Parallel, Semigroup, Eq (and what error type the MonadError uses)",
+        "ResultT[F, A]: purpose, map/flatMap semantics, constructors (liftF/pure/fromResult/success/warning/failure/internalError)",
+        "grackle.syntax extension methods: .success, .toResult, .toResultOrError"
+      ]
+    },
+    {
+      "title": "Problem reference",
+      "diataxisType": "reference",
+      "outline": [
+        "Problem fields: message, locations, path, extensions",
+        "JSON encoding rules (empty fields omitted; locations as {line,col})",
+        "toString human-readable formatting",
+        "Eq semantics (extensions ignored) and the encoder",
+        "Worked encoding examples (full / no-path / no-locations / message-only / extensions)"
+      ]
+    },
+    {
+      "title": "Errors and the GraphQL response: how failures surface",
+      "diataxisType": "explanation",
+      "outline": [
+        "The error model: Problem (client-facing) vs InternalError (effect-level bug) vs ValidationFailure (construction-time)",
+        "mkResponse: how each Result case maps to {data}/{errors,data}/{errors}/raised effect",
+        "Why Warning keeps data while Failure does not",
+        "Problem accumulation: NonEmptyChain, Semigroup/Applicative vs Monad short-circuiting",
+        "Where Problems acquire locations/paths in the pipeline",
+        "ValidationFailure & Severity: validating schemas and mappings"
+      ]
+    },
+    {
+      "title": "How to construct, accumulate and report errors",
+      "diataxisType": "how-to",
+      "outline": [
+        "Return a client error from a resolver/elaborator (Result.failure / Problem with path)",
+        "Return partial data with a warning (Result.warning / Elab.warning)",
+        "Signal an internal bug (Result.internalError / catchNonFatal) and how it propagates",
+        "Accumulate multiple errors with parMapN / traverse / combineAllWithDefault instead of short-circuiting",
+        "Lift Options/Eithers/effects into Result (toResult, fromOption, fromEither, ResultT.liftF)",
+        "Attach locations/path/extensions to a Problem for richer error responses",
+        "Reading the resulting GraphQL JSON (data + errors) in tests with GraphQLResponseTests helpers"
+      ]
+    }
+  ]
+}
